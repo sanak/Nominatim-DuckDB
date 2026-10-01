@@ -21,7 +21,7 @@ import datetime as dt
 
 import sqlalchemy as sa
 
-from .typing import SaSelect, SaRow
+from .typing import SaSelect, SaRow, SaFromClause
 from .sql.sqlalchemy_types import Geometry
 from .types import Point, Bbox, LookupDetails, EntranceDetails
 from .connection import SearchConnection
@@ -584,11 +584,22 @@ async def complete_address_details(conn: SearchConnection, results: List[BaseRes
     if not lookup_ids:
         return
 
-    ltab = sa.func.JsonArrayEach(sa.type_coerce(lookup_ids, sa.JSON))\
-             .table_valued(sa.column('value', type_=sa.JSON))
+    ltab: SaFromClause = sa.func.JsonArrayEach(sa.type_coerce(lookup_ids, sa.JSON))\
+                           .table_valued(sa.column('value', type_=sa.JSON))
 
     t = conn.t.placex
     taddr = conn.t.addressline
+
+    if conn.connection.dialect.name == 'duckdb':
+        # DuckDB cannot use a hash join for the OR condition below and would
+        # read all of place_addressline. Join with one row per lookup id instead.
+        lids = sa.func.list_distinct(sa.func.list_value(ltab.c.value['pid'].as_integer(),
+                                                        ltab.c.value['lid'].as_integer()))
+        ltab = sa.select(ltab.c.value, sa.func.unnest(lids).label('aid')).subquery()
+        addr_join = taddr.c.place_id == ltab.c.aid
+    else:
+        addr_join = sa.or_(taddr.c.place_id == ltab.c.value['pid'].as_integer(),
+                           taddr.c.place_id == ltab.c.value['lid'].as_integer())
 
     sql = sa.select(ltab.c.value['pid'].as_integer().label('src_place_id'),
                     t.c.place_id, t.c.osm_type, t.c.osm_id, t.c.name,
@@ -597,8 +608,7 @@ async def complete_address_details(conn: SearchConnection, results: List[BaseRes
                     sa.case((t.c.type == 'postal_code', 5),
                             else_=t.c.rank_address).label('rank_address'),
                     taddr.c.distance, t.c.country_code, t.c.postcode)\
-            .join(taddr, sa.or_(taddr.c.place_id == ltab.c.value['pid'].as_integer(),
-                                taddr.c.place_id == ltab.c.value['lid'].as_integer()))\
+            .join(taddr, addr_join)\
             .join(t, taddr.c.address_place_id == t.c.place_id)\
             .order_by('src_place_id')\
             .order_by(sa.column('rank_address').desc())\

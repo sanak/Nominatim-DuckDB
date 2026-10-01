@@ -321,6 +321,53 @@ def test_reverse_prunes_placex_row_groups(tmp_path):
         assert rows < 0.2 * nrows
 
 
+def test_address_details_prune_place_addressline(tmp_path):
+    """ The address lines of a place and of its parent must be looked
+        up with a join that skips the row groups of place_addressline
+        that do not contain the places (the table is sorted by place_id).
+    """
+    nside, nlines = 100, 3000000
+    dbfile = tmp_path / 'address.duckdb'
+    _make_synthetic_db(dbfile, nside, 0.01)
+    con = duckdb.connect(str(dbfile))
+    con.execute('SET preserve_insertion_order = true')
+    con.execute('DROP TABLE place_addressline')
+    # 10 address lines for each place, pointing to the places in placex.
+    con.execute(f"""CREATE TABLE src AS
+                    SELECT (i // 10)::BIGINT AS place_id,
+                           ((i * 7) % {nside * nside})::BIGINT AS address_place_id,
+                           0.0 AS distance, true AS fromarea, (i % 2 = 0) AS isaddress
+                      FROM range({nlines}) t(i) ORDER BY random()""")
+    convert_duckdb.create_sorted_table(con, 'place_addressline', 'src',
+                                       order=convert_duckdb.KEY_ORDER['place_addressline'])
+    con.execute('DROP TABLE src')
+    # Place 50 gets its address from its parent with a far-away place_id.
+    con.execute('UPDATE placex SET parent_place_id = 250000 WHERE place_id = 50')
+    con.execute('CHECKPOINT')
+    con.close()
+
+    profile = tmp_path / 'profile.json'
+    api = napi.NominatimAPI(environ={'NOMINATIM_DATABASE_DSN': f'duckdb:dbname={dbfile}'})
+    try:
+        api._loop.run_until_complete(api._async_api.setup_database())
+        profiler = _ScanProfiler(api, profile, 'place_addressline')
+        results = api.lookup([napi.PlaceID(50), napi.PlaceID(7000)], address_details=True)
+    finally:
+        api.close()
+
+    def _lines(*pids):
+        return sorted(((pid * 10 + i) * 7) % (nside * nside) for pid in pids for i in range(10))
+
+    assert [r.place_id for r in results] == [50, 7000]
+    for res, pids in zip(results, ((50, 250000), (7000, ))):
+        assert sorted(a.place_id for a in res.address_rows
+                      if a.place_id is not None and a.place_id != res.place_id) == _lines(*pids)
+
+    print('rows scanned in place_addressline:', profiler.scans, 'of', nlines)
+    assert len(profiler.scans) == 1
+    assert profiler.scans[0] <= 3 * ROW_GROUP_SIZE
+
+
 ###########################################################################
 # Forward search
 
