@@ -104,8 +104,18 @@ class BaseLogger:
 
         sqlstr = str(compiled)
 
-        # duckdb_engine uses the pyformat parameter style of psycopg2
-        if conn.dialect.name in ('postgresql', 'duckdb'):
+        if conn.dialect.name == 'duckdb':
+            # numeric_dollar parameter style: $1, $2, ... in positional
+            # order, without the parameters expanded at execution time.
+            postcompile = set(re.findall(r'__\[POSTCOMPILE_([^]]*)\]', sqlstr))
+            dparams = [repr(params.get(name, None))
+                       for name in compiled.positiontup  # type: ignore
+                       if name not in postcompile]
+            sqlstr = re.sub(r'\$([0-9]+)\b', lambda m: dparams[int(m.group(1)) - 1], sqlstr)
+            return re.sub(r'__\[POSTCOMPILE_([^]]*)\]',
+                          lambda m: repr(params.get(m.group(1), None)), sqlstr)
+
+        if conn.dialect.name == 'postgresql':
             if sa.__version__.startswith('1'):
                 try:
                     sqlstr = re.sub(r'__\[POSTCOMPILE_[^]]*\]', '%s', sqlstr)

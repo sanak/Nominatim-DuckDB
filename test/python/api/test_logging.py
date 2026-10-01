@@ -13,6 +13,10 @@ should remain intact.
 """
 from types import SimpleNamespace
 
+import pytest
+import sqlalchemy as sa
+
+import nominatim_api as napi
 import nominatim_api.logging as loglib
 
 # A value containing HTML-significant characters (&, <, >).
@@ -51,3 +55,29 @@ def test_result_dump_preserves_own_markup():
 
     # The OSM link the logger builds itself must not be escaped away.
     assert '<a href="https://www.openstreetmap.org/node/123">N123</a>' in out
+
+
+def test_format_sql_duckdb(tmp_path):
+    """ DuckDB uses the numeric_dollar parameter style, where '%' needs
+        no escaping and parameters expanded at execution are not numbered.
+    """
+    duckdb = pytest.importorskip('duckdb')
+    pytest.importorskip('duckdb_engine')
+
+    dbfile = tmp_path / 'empty.duckdb'
+    duckdb.connect(str(dbfile)).close()
+    api = napi.NominatimAPI(environ={'NOMINATIM_DATABASE_DSN': f'duckdb:dbname={dbfile}'})
+
+    async def _format():
+        async with api._async_api.begin() as conn:
+            col = sa.column('a', sa.Integer)
+            sql = sa.select(col.in_([1, 2]), col % 3, sa.literal('x'), sa.literal('$[1]'))
+            return loglib.TextLogger().format_sql(conn.connection, sql, None)
+
+    try:
+        out = api._loop.run_until_complete(_format())
+    finally:
+        api.close()
+
+    assert out == "SELECT a IN ([1, 2]) AS anon_1, a % 3 AS anon_2,"\
+                  " 'x' AS anon_3, '$[1]' AS anon_4"
