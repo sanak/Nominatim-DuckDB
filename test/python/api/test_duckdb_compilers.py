@@ -97,6 +97,11 @@ def duckdb_api(apiobj, tmp_path):
     """
     apiobj.add_data('properties', [{'property': 'tokenizer', 'value': 'icu'}])
     apiobj.add_placex(place_id=1, centroid=(139.7671, 35.6812))
+    # Place nodes with all the ranks of PG_REVERSE_PLACE_DIAMETER.
+    for rank in PG_REVERSE_PLACE_DIAMETER:
+        apiobj.add_placex(place_id=100 + rank, osm_type='N', class_='place', type='village',
+                          name={'name': 'Village'}, rank_search=rank, rank_address=20,
+                          centroid=(139.7671, 35.6812))
 
     outfile = tmp_path / 'test.duckdb'
     apiobj.async_to_sync(convert_duckdb.convert(None, outfile, {'reverse'}))
@@ -171,6 +176,52 @@ def test_geometry_result_is_ewkb(duckdb_api):
     t = SearchTables(sa.MetaData()).placex
     out = duckdb_api.scalar(sa.select(t.c.centroid).where(t.c.place_id == 1))
     assert napi.Point.from_wkb(out) == napi.Point(139.7671, 35.6812)
+
+
+# Values of the SQL function reverse_place_diameter() of PostgreSQL.
+PG_REVERSE_PLACE_DIAMETER = {4: 5.0, 8: 1.8, 12: 0.6, 17: 0.16, 18: 0.08,
+                             19: 0.04, 20: 0.02, 30: 0.02}
+
+
+@pytest.mark.parametrize('rank,diameter', PG_REVERSE_PLACE_DIAMETER.items())
+def test_is_below_reverse_distance_like_postgres(duckdb_api, rank, diameter):
+    def _is_below(dist):
+        return duckdb_api.scalar(sa.select(sa.func.IsBelowReverseDistance(
+                                     sa.literal(dist), sa.literal(rank))))
+
+    assert _is_below(diameter * 0.99)
+    assert not _is_below(diameter * 1.01)
+
+
+@pytest.mark.parametrize('rank,diameter', PG_REVERSE_PLACE_DIAMETER.items())
+def test_intersects_reverse_distance_like_postgres(duckdb_api, rank, diameter):
+    # Also checks the extent of the place in placex_place_node_areas.
+    t = SearchTables(sa.MetaData()).placex
+
+    def _intersects(dist):
+        pt = sa.bindparam('pt', type_=Geometry)
+        sql = sa.select(sa.func.count()).where(t.c.place_id == 100 + rank)\
+                .where(sa.func.IntersectsReverseDistance(t, pt))
+        return duckdb_api.scalar(sql, {'pt': f'POINT({139.7671 + dist} 35.6812)'}) == 1
+
+    assert _intersects(diameter * 0.99)
+    assert not _intersects(diameter * 1.01)
+
+
+@pytest.mark.parametrize('rank,diameter', PG_REVERSE_PLACE_DIAMETER.items())
+def test_place_node_areas_like_postgres(rank, diameter):
+    con = duckdb.connect()
+    con.load_extension('spatial')
+    con.execute("""CREATE TABLE placex AS
+                   SELECT 1 AS place_id, ST_Point(10, 20) AS geometry,
+                          ?::SMALLINT AS rank_search, 20::SMALLINT AS rank_address,
+                          'N' AS osm_type, NULL::BIGINT AS linked_place_id""", [rank])
+    extent = con.execute('SELECT ST_XMin(geometry), ST_XMax(geometry),'
+                         ' ST_YMin(geometry), ST_YMax(geometry)'
+                         ' FROM (' + convert_duckdb.NODE_AREAS_SQL + ')').fetchone()
+
+    assert extent == pytest.approx((10 - diameter, 10 + diameter,
+                                    20 - diameter, 20 + diameter))
 
 
 def _make_synthetic_db(dbfile, nside, step):

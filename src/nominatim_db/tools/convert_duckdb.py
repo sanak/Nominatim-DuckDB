@@ -50,7 +50,8 @@ import sqlalchemy as sa
 import nominatim_api as napi
 from nominatim_api.search.query_analyzer_factory import make_query_analyzer
 from nominatim_api.sql.duckdb_layout import (BBOX_TABLES, EXTRA_BBOX_COLUMNS,
-                                             POINT_COLUMNS, bbox_columns)
+                                             POINT_COLUMNS, bbox_columns,
+                                             reverse_place_diameter_sql)
 from nominatim_api.sql.sqlalchemy_types import (Geometry, IntArray, KeyValueStore,
                                                 CategoryArray, Json)
 
@@ -76,8 +77,9 @@ CHUNK_SIZE = 100000
 # hex-encoded WKB easily exceed the default of DuckDB (16MB).
 MAX_OBJECT_SIZE = 2**30
 
-NODE_AREAS_SQL = """
-    SELECT place_id, ST_Expand(geometry, 14.0 * exp(-0.2 * rank_search) - 0.03) AS geometry
+# The places extended by their search radius in reverse geocoding.
+NODE_AREAS_SQL = f"""
+    SELECT place_id, ST_Expand(geometry, {reverse_place_diameter_sql('rank_search')}) AS geometry
       FROM placex
      WHERE rank_address BETWEEN 5 AND 25
            AND osm_type = 'N' AND linked_place_id IS NULL"""

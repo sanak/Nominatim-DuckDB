@@ -27,7 +27,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.compiler import compiles
 
 from ..errors import UsageError
-from .duckdb_layout import table_bbox_columns, bbox_columns
+from .duckdb_layout import table_bbox_columns, bbox_columns, reverse_place_diameter_sql
 from .sqlalchemy_types.geometry import (Geometry, Geometry_DistanceSpheroid,
                                         Geometry_IsLineLike, Geometry_IsAreaLike,
                                         Geometry_IntersectsBbox,
@@ -245,7 +245,7 @@ def _duckdb_reverse_place_diameter(element: IntersectsReverseDistance,
             f" AND {table}.linked_place_id is null"
             f" AND {table}.osm_type = 'N'"
             f" AND ST_Intersects_Extent({geom1},"
-            f" ST_Expand({geom2}, 14.0 * exp(-0.2 * {rank}) - 0.03))"
+            f" ST_Expand({geom2}, {reverse_place_diameter_sql(rank)}))"
             f" AND {table}.place_id IN"
             f" (SELECT place_id FROM placex_place_node_areas"
             f" WHERE {_bbox_overlap_sql(areas, geom2)}))")
@@ -255,7 +255,7 @@ def _duckdb_reverse_place_diameter(element: IntersectsReverseDistance,
 def _duckdb_is_below_reverse_distance(element: IsBelowReverseDistance,
                                       compiler: 'sa.Compiled', **kw: Any) -> str:
     dist, rank = (compiler.process(c, **kw) for c in element.clauses)
-    return f"{dist} < 14.0 * exp(-0.2 * {rank}) - 0.03"
+    return f"{dist} < {reverse_place_diameter_sql(rank)}"
 
 
 @compiles(IsAddressPoint, DIALECT)

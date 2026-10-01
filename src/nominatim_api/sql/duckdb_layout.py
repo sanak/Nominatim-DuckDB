@@ -57,6 +57,19 @@ def table_bbox_columns(table: str) -> Tuple[str, ...]:
     return (BBOX_TABLES[table], ) + EXTRA_BBOX_COLUMNS.get(table, ())
 
 
+def reverse_place_diameter_sql(rank: str) -> str:
+    """ Return the SQL for the search radius (in degrees) of a place node
+        with the search rank given by the SQL expression `rank`. This is the
+        step function `reverse_place_diameter()` of PostgreSQL. The same
+        values must be used for the frontend queries and for the extents
+        of `placex_place_node_areas`.
+    """
+    return (f"CAST(CASE WHEN {rank} <= 4 THEN 5.0 WHEN {rank} <= 8 THEN 1.8"
+            f" WHEN {rank} <= 12 THEN 0.6 WHEN {rank} <= 17 THEN 0.16"
+            f" WHEN {rank} <= 18 THEN 0.08 WHEN {rank} <= 19 THEN 0.04"
+            " ELSE 0.02 END AS DOUBLE)")
+
+
 def bbox_columns(column: str) -> Tuple[str, str, str, str]:
     """ Return the names of the bbox helper columns (minx, miny, maxx, maxy)
         for the given geometry column.

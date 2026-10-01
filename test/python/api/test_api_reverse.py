@@ -280,6 +280,29 @@ def test_reverse_place_node_in_area(apiobj, frontend):
     assert api.reverse((59.30004, 80.70055)).place_id == 1003
 
 
+@pytest.mark.parametrize('dist,place_id', [(0.01, 1005), (0.1, 1004)])
+def test_reverse_place_node_diameter(apiobj, frontend, request, dist, place_id):
+    # A place node of rank 20 only counts up to 0.02 degrees from the point.
+    if request.node.callspec.params['frontend'] == 'sqlite_db' and place_id == 1004:
+        request.applymarker(pytest.mark.xfail(
+            strict=True, reason='SQLite approximates reverse_place_diameter()'))
+    apiobj.add_placex(place_id=1004, class_='boundary', type='administrative',
+                      name={'name': 'Town Area'},
+                      rank_address=16,
+                      rank_search=16,
+                      centroid=(130.5, 30.3),
+                      geometry='POLYGON((130 30, 131 30, 131 31, 130 31, 130 30))')
+    apiobj.add_placex(place_id=1005, class_='place', type='quarter',
+                      name={'name': 'Quarter Point'},
+                      osm_type='N',
+                      rank_address=20,
+                      rank_search=20,
+                      centroid=(130.51 + dist, 30.35))
+
+    api = frontend(apiobj, options=API_OPTIONS)
+    assert api.reverse((130.51, 30.35)).place_id == place_id
+
+
 @pytest.mark.parametrize('layer,place_id', [(napi.DataLayer.MANMADE, 225),
                                             (napi.DataLayer.RAILWAY, 226),
                                             (napi.DataLayer.NATURAL, 227),
