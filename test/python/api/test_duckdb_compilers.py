@@ -14,7 +14,11 @@ import sqlalchemy as sa
 
 import nominatim_api as napi
 from nominatim_api.sql.sqlalchemy_schema import SearchTables
-from nominatim_api.sql.sqlalchemy_types import Geometry
+from nominatim_api.sql.sqlalchemy_types import Geometry, IntArray
+from nominatim_api.sql.sqlalchemy_functions import CategoryMatch
+from nominatim_api.search import db_search_lookups as lookups
+from nominatim_api.search.db_search_fields import FieldRanking, RankedTokens
+from nominatim_api.search.query_analyzer_factory import make_query_analyzer
 
 duckdb = pytest.importorskip('duckdb')
 pytest.importorskip('duckdb_engine')
@@ -23,18 +27,7 @@ from nominatim_api.sql.duckdb_async import AsyncDuckDBDialect  # noqa: E402
 from nominatim_db.tools import convert_duckdb  # noqa: E402
 
 # Constructs with a SQLite variant whose DuckDB variant is still missing.
-# They are only used by the forward search, which is enabled for DuckDB
-# in a later step. Remove the entries from this list as they are done.
-PENDING_DUCKDB_SUPPORT = {
-    'nominatim_api.search.db_search_lookups.LookupAll',
-    'nominatim_api.search.db_search_lookups.LookupAny',
-    'nominatim_api.search.db_search_lookups.Restrict',
-    'nominatim_api.sql.sqlalchemy_functions.RegexpWord',
-    'nominatim_api.sql.sqlalchemy_functions.CategoryMatch',
-    'nominatim_api.sql.sqlalchemy_types.int_array.ArrayAgg',
-    'nominatim_api.sql.sqlalchemy_types.int_array.ArrayContains',
-    'nominatim_api.sql.sqlalchemy_types.int_array.ArrayCat',
-}
+PENDING_DUCKDB_SUPPORT = set()
 
 # The DuckDB row group size. Zonemaps (min/max statistics) are per row group.
 ROW_GROUP_SIZE = 122880
@@ -80,10 +73,21 @@ def test_column_dwithin_uses_bbox_columns():
 
 
 def test_column_dwithin_without_bbox_columns():
+    t = SearchTables(sa.MetaData()).postcode
+    sql = _compile(t.c.centroid.within_distance(sa.literal_column('g'), sa.text('0.5')))
+
+    assert sql == 'ST_DWithin(location_postcodes.centroid, g, 0.5)'
+
+
+def test_column_dwithin_placex_centroid_uses_point_columns():
     t = SearchTables(sa.MetaData()).placex
     sql = _compile(t.c.centroid.within_distance(sa.literal_column('g'), sa.text('0.5')))
 
-    assert sql == 'ST_DWithin(placex.centroid, g, 0.5)'
+    assert sql == ('(placex.centroid_x >= ST_XMin(g) - (0.5)'
+                   ' AND placex.centroid_x <= ST_XMax(g) + (0.5)'
+                   ' AND placex.centroid_y >= ST_YMin(g) - (0.5)'
+                   ' AND placex.centroid_y <= ST_YMax(g) + (0.5)'
+                   ' AND ST_DWithin(placex.centroid, g, 0.5))')
 
 
 @pytest.fixture
@@ -195,10 +199,45 @@ def _make_synthetic_db(dbfile, nside, step):
     for name in tables + ['placex_place_node_areas']:
         convert_duckdb.create_sorted_table(con, name, f'src_{name}',
                                            geom_column=convert_duckdb.BBOX_TABLES.get(name),
-                                           order=convert_duckdb.KEY_ORDER.get(name))
+                                           order=convert_duckdb.KEY_ORDER.get(name),
+                                           extra_columns=convert_duckdb.EXTRA_BBOX_COLUMNS
+                                                                       .get(name, ()))
         con.execute(f'DROP TABLE src_{name}')
     con.execute('CHECKPOINT')
     con.close()
+
+
+class _ScanProfiler:
+    """ Collects the rows scanned by every table scan of the given table
+        for all statements run through the API, using the JSON profiling
+        output of DuckDB.
+    """
+
+    def __init__(self, api, profile, table):
+        self.scans = []
+        engine = api._async_api._engine.sync_engine
+
+        def _find_scans(node):
+            info = node.get('extra_info') or {}
+            # The table name is qualified with the database name.
+            if node.get('operator_type') == 'TABLE_SCAN' \
+               and info.get('Table', '').split('.')[-1] == table:
+                self.scans.append(node['operator_rows_scanned'])
+            for child in node.get('children', []):
+                _find_scans(child)
+
+        @sa.event.listens_for(engine, 'connect')
+        def _enable_profiling(dbapi_con, _):
+            cursor = dbapi_con.cursor()
+            cursor.execute("PRAGMA enable_profiling = 'json'")
+            cursor.execute(f"SET profiling_output = '{profile}'")
+            cursor.execute("PRAGMA profiling_mode = 'detailed'")
+
+        @sa.event.listens_for(engine, 'after_cursor_execute')
+        def _collect_scans(conn, cursor, statement, *_):
+            if table in statement:
+                with open(profile, encoding='utf-8') as fd:
+                    _find_scans(json.load(fd))
 
 
 def test_reverse_prunes_placex_row_groups(tmp_path):
@@ -212,34 +251,11 @@ def test_reverse_prunes_placex_row_groups(tmp_path):
     nrows = nside * nside
     assert nrows >= 20 * ROW_GROUP_SIZE
 
-    scans = []
-
-    def _find_scans(node, out):
-        info = node.get('extra_info') or {}
-        # The table name is qualified with the database name.
-        if node.get('operator_type') == 'TABLE_SCAN' \
-           and info.get('Table', '').split('.')[-1] == 'placex':
-            out.append(node['operator_rows_scanned'])
-        for child in node.get('children', []):
-            _find_scans(child, out)
-
     api = napi.NominatimAPI(environ={'NOMINATIM_DATABASE_DSN': f'duckdb:dbname={dbfile}'})
     try:
         api._loop.run_until_complete(api._async_api.setup_database())
-        engine = api._async_api._engine.sync_engine
-
-        @sa.event.listens_for(engine, 'connect')
-        def _enable_profiling(dbapi_con, _):
-            cursor = dbapi_con.cursor()
-            cursor.execute("PRAGMA enable_profiling = 'json'")
-            cursor.execute(f"SET profiling_output = '{profile}'")
-            cursor.execute("PRAGMA profiling_mode = 'detailed'")
-
-        @sa.event.listens_for(engine, 'after_cursor_execute')
-        def _collect_scans(conn, cursor, statement, *_):
-            if 'placex' in statement:
-                with open(profile, encoding='utf-8') as fd:
-                    _find_scans(json.load(fd), scans)
+        profiler = _ScanProfiler(api, profile, 'placex')
+        scans = profiler.scans
 
         assert api.reverse((135.5, 35.5)).place_id == 550 * nside + 550
         assert api.reverse((131.031, 38.709)).place_id == 871 * nside + 103
@@ -252,3 +268,167 @@ def test_reverse_prunes_placex_row_groups(tmp_path):
     assert len(scans) >= 3
     for rows in scans:
         assert rows < 0.2 * nrows
+
+
+###########################################################################
+# Forward search
+
+@pytest.fixture
+def duckdb_search(apiobj, tmp_path):
+    """ A converted database with search tables for running the
+        search constructs against DuckDB.
+    """
+    apiobj.add_data('properties',
+                    [{'property': 'tokenizer', 'value': 'icu'},
+                     {'property': 'tokenizer_import_normalisation', 'value': ':: lower();'},
+                     {'property': 'tokenizer_import_transliteration', 'value': "'1' > '/1/';"}])
+    apiobj.add_placex(place_id=1, class_='amenity', type='restaurant', housenumber='12a')
+    apiobj.add_placex(place_id=2, class_='amenity', type='fast_food', housenumber='3')
+    apiobj.add_placex(place_id=3, class_='tourism', type='hotel', housenumber='112')
+    apiobj.add_placex(place_id=4, class_='amenity', type='cafe', categories=[])
+    apiobj.add_search_name(1, names=[1, 2, 3], address=[10, 11])
+    apiobj.add_search_name(2, names=[2, 3], address=[11])
+    apiobj.add_search_name(3, names=[4], address=[10])
+
+    async def _word():
+        async with apiobj.api._async_api.begin() as conn:
+            await make_query_analyzer(conn)
+            await conn.connection.run_sync(conn.t.meta.tables['word'].create)
+    apiobj.async_to_sync(_word())
+
+    outfile = tmp_path / 'search.duckdb'
+    apiobj.async_to_sync(convert_duckdb.convert(None, outfile, {'search'}))
+
+    class _Helper:
+        api = napi.NominatimAPI(environ={'NOMINATIM_DATABASE_DSN': f'duckdb:dbname={outfile}'})
+        t = SearchTables(sa.MetaData())
+
+        def rows(self, sql):
+            async def _run():
+                async with self.api._async_api.begin() as conn:
+                    return (await conn.execute(sql)).all()
+            return self.api._loop.run_until_complete(_run())
+
+        def place_ids(self, table, where):
+            return sorted(r[0] for r in self.rows(sa.select(table.c.place_id).where(where)))
+
+    helper = _Helper()
+    yield helper
+    helper.api.close()
+
+
+@pytest.mark.parametrize('lookup,column,tokens,expected',
+                         [(lookups.LookupAll, 'name_vector', [2, 3], [1, 2]),
+                          (lookups.LookupAll, 'name_vector', [1, 2], [1]),
+                          (lookups.LookupAll, 'nameaddress_vector', [10], [1, 3]),
+                          (lookups.LookupAll, 'name_vector', [2, 99], []),
+                          (lookups.LookupAll, 'name_vector', [99], []),
+                          (lookups.LookupAny, 'name_vector', [1, 4], [1, 3]),
+                          (lookups.LookupAny, 'nameaddress_vector', [11, 99], [1, 2]),
+                          (lookups.LookupAny, 'name_vector', [99], []),
+                          (lookups.Restrict, 'name_vector', [2, 3], [1, 2]),
+                          (lookups.Restrict, 'nameaddress_vector', [10, 11], [1])])
+def test_search_name_lookups(duckdb_search, lookup, column, tokens, expected):
+    t = duckdb_search.t.search_name
+    assert duckdb_search.place_ids(t, lookup(t, column, tokens)) == expected
+
+
+def test_weigh_search(duckdb_search):
+    t = duckdb_search.t.search_name
+    ranking = FieldRanking('name_vector', 1.0,
+                           [RankedTokens(0.1, [1, 2]), RankedTokens(0.5, [3])])
+    rows = duckdb_search.rows(sa.select(t.c.place_id, ranking.sql_penalty(t)))
+
+    assert sorted(rows) == [(1, 0.1), (2, 0.5), (3, 1.0)]
+
+
+def test_array_cat_and_contains(duckdb_search):
+    t = duckdb_search.t.search_name
+    both = t.c.name_vector + t.c.nameaddress_vector
+
+    assert duckdb_search.place_ids(t, both.contains(sa.type_coerce([3, 10], IntArray))) == [1]
+    assert duckdb_search.place_ids(t, both.contains(sa.type_coerce([2, 11], IntArray))) == [1, 2]
+
+
+def test_array_agg(duckdb_search):
+    t = duckdb_search.t.search_name
+    out = duckdb_search.rows(sa.select(sa.func.ArrayAgg(t.c.place_id)))[0][0]
+    assert sorted(out) == [1, 2, 3]
+
+
+def test_regexp_word(duckdb_search):
+    t = duckdb_search.t.placex
+    assert duckdb_search.place_ids(t, sa.func.RegexpWord('12A|3', t.c.housenumber)) == [1, 2]
+
+
+@pytest.mark.parametrize('category,expected',
+                         [('osm.amenity', [1, 2]),
+                          ('osm.amenity.restaurant', [1]),
+                          ('osm.amen', []),
+                          ('osm.amenity.rest', [])])
+def test_category_match(duckdb_search, category, expected):
+    t = duckdb_search.t.placex
+    assert duckdb_search.place_ids(t, CategoryMatch(t, category)) == expected
+
+
+def test_category_match_empty_list_is_false(duckdb_search):
+    t = duckdb_search.t.placex
+    assert 4 in duckdb_search.place_ids(t, sa.not_(CategoryMatch(t, 'osm.amenity')))
+
+
+def test_word_lookup_prunes_reverse_search_name(tmp_path):
+    """ Word lookups in reverse_search_name must only read the row
+        groups that contain the words, which works because the table
+        is sorted by word.
+    """
+    nplaces = 1500000
+    dbfile = tmp_path / 'words.duckdb'
+    _make_synthetic_db(dbfile, 1, 0.01)
+    con = duckdb.connect(str(dbfile))
+    con.load_extension('spatial')
+    con.execute('SET preserve_insertion_order = true')
+    con.execute('DROP TABLE search_name')
+    # Every place has its own name and address word, in random order.
+    con.execute(f"""CREATE TABLE search_name AS
+                    SELECT i::BIGINT AS place_id, 0.0001 AS importance,
+                           30::SMALLINT AS search_rank, 30::SMALLINT AS address_rank,
+                           [i]::INTEGER[] AS name_vector,
+                           [i + {nplaces}]::INTEGER[] AS nameaddress_vector,
+                           'jp' AS country_code, ST_Point(135, 35) AS centroid,
+                           135.0 AS centroid_x, 35.0 AS centroid_y
+                      FROM range({nplaces}) t(i) ORDER BY random()""")
+    con.execute('CREATE TABLE src_reverse_search_name AS ' + convert_duckdb.REVERSE_SEARCH_SQL)
+    convert_duckdb.create_sorted_table(con, 'reverse_search_name', 'src_reverse_search_name',
+                                       order=convert_duckdb.KEY_ORDER['reverse_search_name'])
+    con.execute('DROP TABLE src_reverse_search_name')
+    con.execute('CHECKPOINT')
+    nrows = con.execute('SELECT count(*) FROM reverse_search_name').fetchone()[0]
+    con.close()
+    assert nrows >= 20 * ROW_GROUP_SIZE
+
+    profile = tmp_path / 'profile.json'
+    api = napi.NominatimAPI(environ={'NOMINATIM_DATABASE_DSN': f'duckdb:dbname={dbfile}'})
+    try:
+        api._loop.run_until_complete(api._async_api.setup_database())
+        profiler = _ScanProfiler(api, profile, 'reverse_search_name')
+        t = SearchTables(sa.MetaData()).search_name
+
+        async def _lookup(where):
+            async with api._async_api.begin() as conn:
+                return sorted(r[0] for r in await conn.execute(sa.select(t.c.place_id)
+                                                               .where(where)))
+
+        def lookup(where):
+            return api._loop.run_until_complete(_lookup(where))
+
+        assert lookup(lookups.LookupAll(t, 'name_vector', [1234])) == [1234]
+        assert lookup(lookups.LookupAll(t, 'nameaddress_vector',
+                                        [nplaces + 77])) == [77]
+        assert lookup(lookups.LookupAny(t, 'name_vector', [5, 1400000])) == [5, 1400000]
+    finally:
+        api.close()
+
+    print('rows scanned in reverse_search_name:', profiler.scans, 'of', nrows)
+    assert len(profiler.scans) == 3
+    for rows in profiler.scans:
+        assert rows <= 2 * ROW_GROUP_SIZE

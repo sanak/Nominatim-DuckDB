@@ -14,7 +14,8 @@ from nominatim_api.search.query_analyzer_factory import make_query_analyzer
 duckdb = pytest.importorskip('duckdb')
 pytest.importorskip('duckdb_engine')
 
-from nominatim_api.sql.duckdb_layout import BBOX_TABLES, bbox_columns  # noqa: E402
+from nominatim_api.sql.duckdb_layout import (BBOX_TABLES, bbox_columns,  # noqa: E402
+                                             table_bbox_columns)
 from nominatim_db.tools import convert_duckdb  # noqa: E402
 from nominatim_db.errors import UsageError  # noqa: E402
 
@@ -28,6 +29,13 @@ def test_bbox_columns_naming():
                                        'linegeo_maxx', 'linegeo_maxy')
     assert bbox_columns('centroid') == ('centroid_x', 'centroid_y',
                                         'centroid_x', 'centroid_y')
+
+
+def test_table_bbox_columns():
+    assert table_bbox_columns('placex') == ('geometry', 'centroid')
+    assert table_bbox_columns('search_name') == ('centroid', )
+    assert table_bbox_columns('location_property_osmline') == ('linegeo', )
+    assert table_bbox_columns('word') == ()
 
 
 @pytest.fixture
@@ -99,10 +107,10 @@ def test_convert_copies_tables(converted):
               .fetchone()[0] == 'POINT (130 30)'
 
 
-@pytest.mark.parametrize('table', sorted(BBOX_TABLES))
-def test_convert_bbox_columns(converted, table):
+@pytest.mark.parametrize('table,geom', [(t, g) for t in sorted(BBOX_TABLES)
+                                        for g in table_bbox_columns(t)])
+def test_convert_bbox_columns(converted, table, geom):
     _, con = converted
-    geom = BBOX_TABLES[table]
     minx, miny, maxx, maxy = bbox_columns(geom)
     bad = con.execute(f"""SELECT count(*) FROM {table}
                           WHERE {geom} IS NOT NULL

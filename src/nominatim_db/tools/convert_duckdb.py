@@ -19,6 +19,8 @@ on DuckDB skipping row groups through their min/max statistics instead:
     and the naming of the columns: `minx/miny/maxx/maxy` for a column
     called `geometry`, `<col>_x/<col>_y` for points (`centroid`) and
     `<col>_minx/..._maxy` otherwise. Use `bbox_columns()` to get the names.
+    Some tables have bbox columns for a second geometry column
+    (`EXTRA_BBOX_COLUMNS`, e.g. the centroid of placex).
   * The spatial sort order puts geometries into size tiers first (so that
     a few huge polygons do not widen the bbox of every row group) and
     then orders by the Hilbert value of the bbox centre, using the extent
@@ -33,7 +35,7 @@ The environment variables DUCKDB_MEMORY_LIMIT and DUCKDB_TEMP_DIR
 optionally set the memory limit and spill directory of DuckDB during
 the conversion.
 """
-from typing import Set, Any, Dict, Optional, Union, TextIO
+from typing import Set, Any, Dict, Optional, Union, TextIO, Sequence
 import datetime as dt
 import json
 import logging
@@ -47,7 +49,8 @@ import sqlalchemy as sa
 
 import nominatim_api as napi
 from nominatim_api.search.query_analyzer_factory import make_query_analyzer
-from nominatim_api.sql.duckdb_layout import BBOX_TABLES, POINT_COLUMNS, bbox_columns
+from nominatim_api.sql.duckdb_layout import (BBOX_TABLES, EXTRA_BBOX_COLUMNS,
+                                             POINT_COLUMNS, bbox_columns)
 from nominatim_api.sql.sqlalchemy_types import (Geometry, IntArray, KeyValueStore,
                                                 CategoryArray, Json)
 
@@ -186,36 +189,50 @@ def _json_default(value: Any) -> Any:
 
 def create_sorted_table(con: 'duckdb.DuckDBPyConnection', name: str, source: str,
                         geom_column: Optional[str] = None,
-                        order: Optional[str] = None) -> None:
+                        order: Optional[str] = None,
+                        extra_columns: Sequence[str] = ()) -> None:
     """ Create the table `name` from the content of table `source`.
 
         With a `geom_column`, the bbox helper columns for that column are
         added and the rows are sorted spatially. Otherwise the rows are
-        sorted by the SQL expression `order`, if given.
+        sorted by the SQL expression `order`, if given. The geometry columns
+        in `extra_columns` get bbox helper columns, too, but do not
+        influence the sort order.
     """
-    sql = f'SELECT * FROM {source}'
+    bbox_sql = [_bbox_sql(col) for col in extra_columns]
 
     if geom_column is not None:
         geom = f'"{geom_column}"'
+        minx, miny, maxx, maxy = bbox_columns(geom_column)
+        bbox_sql.insert(0, _bbox_sql(geom_column))
         if geom_column in POINT_COLUMNS:
-            xcol, ycol, _, _ = bbox_columns(geom_column)
-            sql = f'SELECT *, ST_X({geom}) AS {xcol}, ST_Y({geom}) AS {ycol} FROM {source}'
-            xmid, ymid = xcol, ycol
+            xmid, ymid = minx, miny
             size = None
         else:
-            minx, miny, maxx, maxy = bbox_columns(geom_column)
-            sql = f"""SELECT *, ST_XMin({geom}) AS {minx}, ST_YMin({geom}) AS {miny},
-                                ST_XMax({geom}) AS {maxx}, ST_YMax({geom}) AS {maxy}
-                        FROM {source}"""
             xmid, ymid = f'(({minx} + {maxx}) / 2)', f'(({miny} + {maxy}) / 2)'
             size = f'greatest({maxx} - {minx}, {maxy} - {miny})'
 
         order = _spatial_order(con, source, geom, xmid, ymid, size)
 
+    sql = f'SELECT *{"".join(", " + b for b in bbox_sql)} FROM {source}'
+
     if order is not None:
         sql = f'SELECT * FROM ({sql}) ORDER BY {order}'
 
     con.execute(f'CREATE TABLE {name} AS {sql}')
+
+
+def _bbox_sql(column: str) -> str:
+    """ Return the select expressions for the bbox helper columns
+        of the given geometry column.
+    """
+    geom = f'"{column}"'
+    minx, miny, maxx, maxy = bbox_columns(column)
+    if column in POINT_COLUMNS:
+        return f'ST_X({geom}) AS {minx}, ST_Y({geom}) AS {miny}'
+
+    return (f'ST_XMin({geom}) AS {minx}, ST_YMin({geom}) AS {miny},'
+            f' ST_XMax({geom}) AS {maxx}, ST_YMax({geom}) AS {maxy}')
 
 
 def _spatial_order(con: 'duckdb.DuckDBPyConnection', source: str, geom: str,
@@ -358,5 +375,6 @@ class DuckDBWriter:
         """
         create_sorted_table(self.dest, f'"{name}"', f'stage."{name}"',
                             geom_column=BBOX_TABLES.get(name),
-                            order=KEY_ORDER.get(name))
+                            order=KEY_ORDER.get(name),
+                            extra_columns=EXTRA_BBOX_COLUMNS.get(name, ()))
         self.dest.execute(f'DROP TABLE stage."{name}"')

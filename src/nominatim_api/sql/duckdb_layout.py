@@ -18,6 +18,9 @@ The bbox helper columns of a geometry column `<col>` are named:
   * `<col>_x`, `<col>_y` for point columns (`centroid`). The point is its
     own bounding box, so `bbox_columns()` returns the x/y columns twice,
   * `<col>_minx`, `<col>_miny`, `<col>_maxx`, `<col>_maxy` otherwise.
+
+Use `table_bbox_columns()` to find out which geometry columns of a table
+have bbox helper columns.
 """
 from typing import Dict, Tuple
 
@@ -36,6 +39,22 @@ BBOX_TABLES: Dict[str, str] = {
     'country_osm_grid': 'geometry',
     'search_name': 'centroid',
 }
+
+# Further geometry columns with bbox helper columns, which do not
+# influence the sort order. The centroid of placex is filtered by
+# distance in POI and near searches.
+EXTRA_BBOX_COLUMNS: Dict[str, Tuple[str, ...]] = {
+    'placex': ('centroid', ),
+}
+
+
+def table_bbox_columns(table: str) -> Tuple[str, ...]:
+    """ Return the geometry columns of the given table which have
+        bbox helper columns. The first one determines the sort order.
+    """
+    if table not in BBOX_TABLES:
+        return ()
+    return (BBOX_TABLES[table], ) + EXTRA_BBOX_COLUMNS.get(table, ())
 
 
 def bbox_columns(column: str) -> Tuple[str, str, str, str]:
