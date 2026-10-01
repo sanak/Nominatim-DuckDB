@@ -13,6 +13,8 @@ import pytest
 
 import nominatim_api as napi
 
+pytestmark = pytest.mark.duckdb_ok
+
 
 def test_lookup_empty_list(apiobj, frontend):
     api = frontend(apiobj, options={'details'})
@@ -109,7 +111,7 @@ def test_lookup_multiple_places(apiobj, frontend):
 
 
 @pytest.mark.parametrize('gtype', list(napi.GeometryFormat))
-def test_simple_place_with_geometry(apiobj, frontend, gtype):
+def test_simple_place_with_geometry(apiobj, frontend, gtype, is_duckdb):
     apiobj.add_placex(place_id=332, osm_type='W', osm_id=4,
                       class_='highway', type='residential',
                       name={'name': 'Road'}, address={'city': 'Barrow'},
@@ -124,6 +126,11 @@ def test_simple_place_with_geometry(apiobj, frontend, gtype):
                       geometry='POLYGON((23 34, 23.1 34, 23.1 34.1, 23 34))')
 
     api = frontend(apiobj, options={'details'})
+    if is_duckdb and gtype == napi.GeometryFormat.KML:
+        with pytest.raises(napi.UsageError, match='KML'):
+            api.lookup([napi.OsmID('W', 4)], geometry_output=gtype)
+        return
+
     result = api.lookup([napi.OsmID('W', 4)], geometry_output=gtype)
 
     assert len(result) == 1

@@ -195,6 +195,14 @@ def pytest_configure(config):
         'markers', 'duckdb_ok: test is expected to pass on the DuckDB frontend fixture')
 
 
+@pytest.fixture
+def is_duckdb(request):
+    """ True, when the test runs against the DuckDB variant of 'frontend'.
+    """
+    callspec = getattr(request.node, 'callspec', None)
+    return callspec is not None and callspec.params.get('frontend') == 'duckdb_db'
+
+
 @pytest.fixture(params=['postgres_db', 'sqlite_db', 'duckdb_db'])
 def frontend(request, tmp_path):
     testapis = []

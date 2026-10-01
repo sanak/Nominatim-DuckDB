@@ -18,6 +18,8 @@ import nominatim_api as napi
 
 API_OPTIONS = {'reverse'}
 
+pytestmark = pytest.mark.duckdb_ok
+
 
 def test_reverse_rank_30(apiobj, frontend):
     apiobj.add_placex(place_id=223, class_='place', type='house',
@@ -335,7 +337,7 @@ def test_reverse_country_lookup_country_only(apiobj, frontend, rank, with_geom):
 
 
 @pytest.mark.parametrize('with_geom', [True, False])
-def test_reverse_country_lookup_place_node_inside(apiobj, frontend, with_geom):
+def test_reverse_country_lookup_place_node_inside(apiobj, frontend, with_geom, is_duckdb):
     apiobj.add_country('xx', 'POLYGON((0 0, 0 1, 1 1, 1 0, 0 0))')
     apiobj.add_country('yy', 'POLYGON((10 0, 10 1, 11 1, 11 0, 10 0))')
     apiobj.add_placex(place_id=225, class_='place', type='state',
@@ -353,7 +355,9 @@ def test_reverse_country_lookup_place_node_inside(apiobj, frontend, with_geom):
                       country_code='yy',
                       centroid=(10.5, 0.505))
 
-    params = {'geometry_output': napi.GeometryFormat.KML} if with_geom else {}
+    # DuckDB cannot produce KML.
+    gtype = napi.GeometryFormat.SVG if is_duckdb else napi.GeometryFormat.KML
+    params = {'geometry_output': gtype} if with_geom else {}
 
     api = frontend(apiobj, options=API_OPTIONS)
     assert api.reverse((0.5, 0.5), **params).place_id == 225
@@ -361,7 +365,7 @@ def test_reverse_country_lookup_place_node_inside(apiobj, frontend, with_geom):
 
 
 @pytest.mark.parametrize('gtype', list(napi.GeometryFormat))
-def test_reverse_geometry_output_placex(apiobj, frontend, gtype):
+def test_reverse_geometry_output_placex(apiobj, frontend, gtype, is_duckdb):
     apiobj.add_country('xx', 'POLYGON((0 0, 0 1, 1 1, 1 0, 0 0))')
     apiobj.add_placex(place_id=1001, class_='place', type='house',
                       housenumber='1',
@@ -377,6 +381,11 @@ def test_reverse_geometry_output_placex(apiobj, frontend, gtype):
                       centroid=(0.5, 0.5))
 
     api = frontend(apiobj, options=API_OPTIONS)
+    if is_duckdb and gtype == napi.GeometryFormat.KML:
+        with pytest.raises(napi.UsageError, match='KML'):
+            api.reverse((59.3, 80.70001), geometry_output=gtype)
+        return
+
     assert api.reverse((59.3, 80.70001), geometry_output=gtype).place_id == 1001
     assert api.reverse((0.5, 0.5), geometry_output=gtype).place_id == 1003
 

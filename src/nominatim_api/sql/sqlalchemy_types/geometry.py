@@ -8,7 +8,7 @@
 Custom types for SQLAlchemy.
 """
 from __future__ import annotations
-from typing import Callable, Any, cast
+from typing import Callable, Any, Dict, cast
 
 import sqlalchemy as sa
 from sqlalchemy.ext.compiler import compiles
@@ -272,6 +272,10 @@ SQLITE_FUNCTION_ALIAS = (
 )
 
 
+# Function classes created for the aliases above, by function name.
+FUNCTION_ALIAS_CLASSES: Dict[str, type] = {}
+
+
 def _add_function_alias(func: str, ftype: type, alias: str) -> None:
     _FuncDef = type(func, (sa.sql.functions.GenericFunction, ), {
         "type": ftype(),
@@ -285,6 +289,7 @@ def _add_function_alias(func: str, ftype: type, alias: str) -> None:
         return func_templ % compiler.process(element.clauses, **kw)
 
     compiles(_FuncDef, 'sqlite')(_sqlite_impl)
+    FUNCTION_ALIAS_CLASSES[func] = _FuncDef
 
 
 for alias in SQLITE_FUNCTION_ALIAS:

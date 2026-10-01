@@ -28,6 +28,7 @@ from .sql.sqlalchemy_schema import SearchTables
 from .sql.async_core_library import PGCORE_LIB, PGCORE_ERROR
 from .config import Configuration
 from .sql import sqlite_functions, sqlalchemy_functions, duckdb_functions  # noqa
+from .sql import duckdb_compilers  # noqa
 from .connection import SearchConnection
 from .status import get_status, StatusResult
 from .lookup import get_places, get_detailed_place
