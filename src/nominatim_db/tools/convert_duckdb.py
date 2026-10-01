@@ -51,6 +51,8 @@ from nominatim_api.sql.duckdb_layout import BBOX_TABLES, POINT_COLUMNS, bbox_col
 from nominatim_api.sql.sqlalchemy_types import (Geometry, IntArray, KeyValueStore,
                                                 CategoryArray, Json)
 
+from ..errors import UsageError
+
 LOG = logging.getLogger()
 
 # Physical sort order for tables that are looked up by key.
@@ -111,10 +113,26 @@ async def convert(project_dir: Optional[Union[str, Path]],
 def _connect(outfile: Path, extension_dir: str) -> 'duckdb.DuckDBPyConnection':
     """ Open the output database for writing and load the spatial extension.
     """
-    config: Dict[str, Any] = {}
+    # Same extension policy as the frontend: never download extensions.
+    config: Dict[str, Any] = {'autoinstall_known_extensions': False,
+                              'autoload_known_extensions': False}
     if extension_dir:
         config['extension_directory'] = extension_dir
     con = duckdb.connect(str(outfile), config=config)
+
+    try:
+        con.execute('LOAD spatial')
+    except duckdb.Error as err:
+        con.close()
+        for suffix in ('', '.wal'):
+            Path(str(outfile) + suffix).unlink(missing_ok=True)
+        where = f"directory '{extension_dir}'" if extension_dir else 'default directory'
+        raise UsageError(
+            f"Cannot load the DuckDB spatial extension from the {where}: {err}\n"
+            "Install it beforehand, for example with: python3 -c \"import duckdb; "
+            "duckdb.connect().install_extension('spatial')\" and set "
+            "NOMINATIM_DUCKDB_EXTENSION_DIR to the extension directory if it is "
+            "not the DuckDB default.") from err
 
     if os.environ.get('DUCKDB_MEMORY_LIMIT'):
         con.execute(f"SET memory_limit = {_quote(os.environ['DUCKDB_MEMORY_LIMIT'])}")
@@ -122,12 +140,6 @@ def _connect(outfile: Path, extension_dir: str) -> 'duckdb.DuckDBPyConnection':
         con.execute(f"SET temp_directory = {_quote(os.environ['DUCKDB_TEMP_DIR'])}")
     # The sorted tables are created with CREATE TABLE AS ... ORDER BY.
     con.execute('SET preserve_insertion_order = true')
-
-    try:
-        con.execute('LOAD spatial')
-    except duckdb.Error:
-        con.execute('INSTALL spatial')
-        con.execute('LOAD spatial')
 
     return con
 
@@ -253,6 +265,7 @@ class DuckDBWriter:
         """ Create the database structure and copy the data from
             the source database to the destination.
         """
+        self._remove_stage()  # leftovers of an aborted run
         tmpdir = tempfile.mkdtemp(prefix='nominatim-convert-', dir=self.outfile.parent)
         self.dest.execute(f'ATTACH {_quote(self.stage)} AS stage')
         try:
@@ -273,8 +286,11 @@ class DuckDBWriter:
         finally:
             self.dest.execute('DETACH stage')
             shutil.rmtree(tmpdir, ignore_errors=True)
-            for suffix in ('', '.wal'):
-                Path(str(self.stage) + suffix).unlink(missing_ok=True)
+            self._remove_stage()
+
+    def _remove_stage(self) -> None:
+        for suffix in ('', '.wal'):
+            Path(str(self.stage) + suffix).unlink(missing_ok=True)
 
     async def copy_table(self, table: sa.Table, tmpdir: Path) -> None:
         """ Copy the content of the given table into the staging database

@@ -16,6 +16,7 @@ pytest.importorskip('duckdb_engine')
 
 from nominatim_api.sql.duckdb_layout import BBOX_TABLES, bbox_columns  # noqa: E402
 from nominatim_db.tools import convert_duckdb  # noqa: E402
+from nominatim_db.errors import UsageError  # noqa: E402
 
 # DuckDB row group size: zonemaps (min/max) are kept per row group.
 ROW_GROUP_SIZE = 122880
@@ -146,3 +147,28 @@ def test_spatial_sort_prunes_row_groups(tmp_path):
             pruned = sum(1 for (x0, y0, x1, y1) in stats
                          if x < x0 or x > x1 or y < y0 or y > y1)
             assert pruned / len(stats) >= 0.5, (x, y)
+
+
+def test_connect_disables_extension_autoloading(tmp_path):
+    con = convert_duckdb._connect(tmp_path / 'out.duckdb', '')
+    try:
+        settings = dict(con.execute(
+            """SELECT name, value FROM duckdb_settings()
+                WHERE name IN ('autoinstall_known_extensions',
+                               'autoload_known_extensions')""").fetchall())
+    finally:
+        con.close()
+    assert settings == {'autoinstall_known_extensions': 'false',
+                        'autoload_known_extensions': 'false'}
+
+
+def test_connect_missing_spatial_extension(tmp_path):
+    extdir = tmp_path / 'ext'
+    extdir.mkdir()
+    outfile = tmp_path / 'out.duckdb'
+
+    with pytest.raises(UsageError, match='NOMINATIM_DUCKDB_EXTENSION_DIR'):
+        convert_duckdb._connect(outfile, str(extdir))
+
+    assert list(extdir.iterdir()) == []  # nothing was downloaded
+    assert not outfile.exists()
