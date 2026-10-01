@@ -687,3 +687,35 @@ class TestSearchEndPointSearchCategory:
         res = await glue.search_endpoint(napi.NominatimAPIAsync(), a)
 
         assert len(json.loads(res.output)) == 1
+
+
+class TestKMLOutputOnBackends:
+    """ KML output is not available with DuckDB. The endpoints must
+        report that as a client error.
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup_place(self, apiobj):
+        apiobj.add_placex(place_id=332, osm_type='W', osm_id=4,
+                          class_='amenity', type='cafe', rank_search=30, rank_address=30,
+                          centroid=(23, 34))
+
+    def run_endpoint(self, api, endpoint, params):
+        params.update({'polygon_kml': '1', 'format': 'json'})
+        return api._loop.run_until_complete(endpoint(api._async_api, FakeAdaptor(params=params)))
+
+    @pytest.mark.duckdb_ok
+    @pytest.mark.parametrize('endpoint,params',
+                             [(glue.reverse_endpoint, {'lat': '34', 'lon': '23'}),
+                              (glue.lookup_endpoint, {'osm_ids': 'W4'})])
+    def test_kml_output(self, apiobj, frontend, is_duckdb, endpoint, params):
+        api = frontend(apiobj, options={'reverse', 'details'})
+
+        if is_duckdb:
+            with pytest.raises(FakeError, match='^400 -- .*KML') as excinfo:
+                self.run_endpoint(api, endpoint, params)
+            assert excinfo.value.status == 400
+        else:
+            resp = self.run_endpoint(api, endpoint, params)
+            assert resp.status == 200
+            assert '<Point>' in resp.output

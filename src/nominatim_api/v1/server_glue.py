@@ -232,7 +232,11 @@ async def reverse_endpoint(api: NominatimAPIAsync, params: ASGIAdaptor) -> Any:
     details['query_stats'] = params.query_stats()
     details['entrances'] = params.get_bool('entrances', False)
 
-    result = await api.reverse(coord, **details)
+    try:
+        result = await api.reverse(coord, **details)
+    except UsageError as err:
+        # e.g. an output format that the database backend cannot produce
+        params.raise_error(str(err))
 
     if debug:
         return build_response(params, loglib.get_and_disable(), num_results=1 if result else 0)
@@ -281,7 +285,11 @@ async def lookup_endpoint(api: NominatimAPIAsync, params: ASGIAdaptor) -> Any:
         params.raise_error('Too many object IDs.')
 
     if places:
-        results = await api.lookup(places, **details)
+        try:
+            results = await api.lookup(places, **details)
+        except UsageError as err:
+            # e.g. an output format that the database backend cannot produce
+            params.raise_error(str(err))
     else:
         results = SearchResults()
 

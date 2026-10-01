@@ -66,8 +66,8 @@ def _bbox_overlap_sql(bbox: List[str], geom: str, dist: str = '') -> str:
         scan, where they skip row groups.
     """
     minx, miny, maxx, maxy = bbox
-    sub = f' - {dist}' if dist else ''
-    add = f' + {dist}' if dist else ''
+    sub = f' - ({dist})' if dist else ''
+    add = f' + ({dist})' if dist else ''
     return (f"{maxx} >= ST_XMin({geom}){sub} AND {minx} <= ST_XMax({geom}){add}"
             f" AND {maxy} >= ST_YMin({geom}){sub} AND {miny} <= ST_YMax({geom}){add}")
 

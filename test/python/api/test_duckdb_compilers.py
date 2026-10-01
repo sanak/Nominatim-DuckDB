@@ -72,11 +72,11 @@ def test_column_intersects_uses_bbox_columns():
 
 def test_column_dwithin_uses_bbox_columns():
     t = SearchTables(sa.MetaData()).osmline
-    sql = _compile(t.c.linegeo.within_distance(sa.literal_column('g'), sa.text('0.5')))
+    sql = _compile(t.c.linegeo.within_distance(sa.literal_column('g'), sa.text('0.25 + 0.25')))
 
-    assert 'location_property_osmline.linegeo_maxx >= ST_XMin(g) - 0.5' in sql
-    assert 'location_property_osmline.linegeo_miny <= ST_YMax(g) + 0.5' in sql
-    assert sql.endswith('ST_DWithin(location_property_osmline.linegeo, g, 0.5))')
+    assert 'location_property_osmline.linegeo_maxx >= ST_XMin(g) - (0.25 + 0.25)' in sql
+    assert 'location_property_osmline.linegeo_miny <= ST_YMax(g) + (0.25 + 0.25)' in sql
+    assert sql.endswith('ST_DWithin(location_property_osmline.linegeo, g, 0.25 + 0.25))')
 
 
 def test_column_dwithin_without_bbox_columns():
