@@ -17,8 +17,9 @@ from ...typing import SaColumn
 
 class CategoryArray(sa.types.UserDefinedType):  # type: ignore[type-arg]
     """ Array of ltree categories (``osm.<class>.<type>``). Maps to a native
-        ``ltree[]`` column on PostgreSQL and to comma-separated text on other
-        dialects (SQLite), where the categories column is not queried.
+        ``ltree[]`` column on PostgreSQL, to a ``VARCHAR[]`` list on DuckDB
+        and to comma-separated text on SQLite, where the categories column
+        is not queried.
     """
     cache_ok = True
 
@@ -26,7 +27,7 @@ class CategoryArray(sa.types.UserDefinedType):  # type: ignore[type-arg]
         return 'ltree[]'
 
     def bind_processor(self, dialect: 'sa.Dialect') -> Optional[Callable[[Any], Any]]:
-        if dialect.name == 'postgresql':
+        if dialect.name in ('postgresql', 'duckdb'):
             return None
 
         def process(value: Any) -> Optional[str]:
@@ -44,6 +45,9 @@ class CategoryArray(sa.types.UserDefinedType):  # type: ignore[type-arg]
                 value = value.strip('{}')
                 return value.split(',') if value else []
             return process_pg
+        if dialect.name == 'duckdb':
+            # Native VARCHAR[] column, returned as a Python list.
+            return None
 
         def process(value: Any) -> Optional[list[str]]:
             return value.split(',') if value else None

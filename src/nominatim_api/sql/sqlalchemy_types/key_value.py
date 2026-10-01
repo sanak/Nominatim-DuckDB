@@ -26,6 +26,9 @@ class KeyValueStore(sa.types.TypeDecorator[Any]):
     def load_dialect_impl(self, dialect: SaDialect) -> sa.types.TypeEngine[Any]:
         if dialect.name == 'postgresql':
             return HSTORE()  # type: ignore[no-untyped-call]
+        if dialect.name == 'duckdb':
+            # JSON column, which DuckDB returns as a string.
+            return sa.types.JSON(none_as_null=True)
 
         return sqlite_json(none_as_null=True)
 

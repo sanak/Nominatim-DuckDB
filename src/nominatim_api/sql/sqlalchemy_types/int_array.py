@@ -41,7 +41,8 @@ class IntArray(sa.types.TypeDecorator[Any]):
     cache_ok = True
 
     def load_dialect_impl(self, dialect: SaDialect) -> sa.types.TypeEngine[Any]:
-        if dialect.name == 'postgresql':
+        if dialect.name in ('postgresql', 'duckdb'):
+            # DuckDB has native lists (INTEGER[]), returned as Python lists.
             return ARRAY(sa.Integer())
 
         return IntList()
