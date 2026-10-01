@@ -190,11 +190,28 @@ def apiobj(temp_db_with_extensions, temp_db_conn, monkeypatch):
     testapi.api.close()
 
 
-@pytest.fixture(params=['postgres_db', 'sqlite_db'])
+def pytest_configure(config):
+    config.addinivalue_line(
+        'markers', 'duckdb_ok: test is expected to pass on the DuckDB frontend fixture')
+
+
+@pytest.fixture(params=['postgres_db', 'sqlite_db', 'duckdb_db'])
 def frontend(request, tmp_path):
     testapis = []
-    if request.param == 'sqlite_db':
-        db = str(tmp_path / 'test_nominatim_python_unittest.sqlite')
+    if request.param in ('sqlite_db', 'duckdb_db'):
+        kind = request.param[:-3]
+        if kind == 'duckdb':
+            # Central switch while the DuckDB frontend is incomplete:
+            # tests opt in with the 'duckdb_ok' marker.
+            if not request.node.get_closest_marker('duckdb_ok'):
+                pytest.xfail('DuckDB support pending')
+            pytest.importorskip('duckdb')
+            pytest.importorskip('duckdb_engine')
+            from nominatim_db.tools import convert_duckdb
+            converter = convert_duckdb
+        else:
+            converter = convert_sqlite
+        db = str(tmp_path / f'test_nominatim_python_unittest.{kind}')
 
         def mkapi(apiobj, options={'reverse'}):
             apiobj.add_data(
@@ -214,8 +231,8 @@ def frontend(request, tmp_path):
 
             apiobj.async_to_sync(_do_sql())
 
-            apiobj.async_to_sync(convert_sqlite.convert(None, db, options))
-            outapi = napi.NominatimAPI(environ={'NOMINATIM_DATABASE_DSN': f"sqlite:dbname={db}",
+            apiobj.async_to_sync(converter.convert(None, db, options))
+            outapi = napi.NominatimAPI(environ={'NOMINATIM_DATABASE_DSN': f"{kind}:dbname={db}",
                                                 'NOMINATIM_USE_US_TIGER_DATA': 'yes'})
             testapis.append(outapi)
 

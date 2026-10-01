@@ -104,7 +104,8 @@ class BaseLogger:
 
         sqlstr = str(compiled)
 
-        if conn.dialect.name == 'postgresql':
+        # duckdb_engine uses the pyformat parameter style of psycopg2
+        if conn.dialect.name in ('postgresql', 'duckdb'):
             if sa.__version__.startswith('1'):
                 try:
                     sqlstr = re.sub(r'__\[POSTCOMPILE_[^]]*\]', '%s', sqlstr)

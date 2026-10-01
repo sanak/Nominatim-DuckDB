@@ -53,8 +53,7 @@ class ConvertDB:
     """ Convert an existing database into a different format. (EXPERIMENTAL)
 
         Dump a read-only version of the database in a different format.
-        At the moment only a SQLite database suitable for reverse lookup
-        can be created.
+        Supported are SQLite and DuckDB databases.
     """
 
     def __init__(self) -> None:
@@ -62,8 +61,8 @@ class ConvertDB:
 
     def add_args(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument('--format', default='sqlite',
-                            choices=('sqlite', ),
-                            help='Format of the output database (must be sqlite currently)')
+                            choices=('sqlite', 'duckdb'),
+                            help='Format of the output database (default: sqlite)')
         parser.add_argument('--output', '-o', required=True, type=Path,
                             help='File to write the database to.')
         group = parser.add_argument_group('Switches to define database layout'
@@ -83,6 +82,11 @@ class ConvertDB:
         if args.format == 'sqlite':
             from ..tools import convert_sqlite
             asyncio_run(convert_sqlite.convert(args.project_dir, args.output, self.options))
+            return 0
+
+        if args.format == 'duckdb':
+            from ..tools import convert_duckdb
+            asyncio_run(convert_duckdb.convert(args.project_dir, args.output, self.options))
             return 0
 
         return 1

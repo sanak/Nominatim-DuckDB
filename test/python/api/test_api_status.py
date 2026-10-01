@@ -15,6 +15,8 @@ import pytest
 from nominatim_api.version import NOMINATIM_API_VERSION
 import nominatim_api as napi
 
+pytestmark = pytest.mark.duckdb_ok
+
 
 def test_status_no_extra_info(apiobj, frontend):
     api = frontend(apiobj)
