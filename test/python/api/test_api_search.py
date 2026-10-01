@@ -11,6 +11,7 @@ These tests make sure that all Python code is correct and executable.
 Functional tests can be found in the BDD test suite.
 """
 import pytest
+import sqlalchemy as sa
 
 import nominatim_api as napi
 import nominatim_api.logging as loglib
@@ -80,6 +81,27 @@ def test_search_japanese_name(apiobj, frontend):
     details = api.details(napi.PlaceID(500), keywords=True)
     assert {w.word for w in details.name_keywords} == {'東京駅'}
     assert {w.word for w in details.address_keywords} == {'丸の内'}
+
+
+REGEXP_WORD_CASES = [('1番地', '1', False), ('東京駅1', '1', False),
+                     ('丁目3', '3', False), ('ä1', '1', False),
+                     ('１', '１', True), ('1番地', '1番地', True),
+                     ('12a', '12|3', False), ('12a', '12a|3', True),
+                     ('112', '12', False)]
+
+
+def test_regexp_word_same_on_all_backends(apiobj, frontend):
+    """ Housenumber matching must use Unicode word boundaries everywhere.
+    """
+    apiobj.add_word_table([])
+    api = frontend(apiobj, options=API_OPTIONS)
+
+    async def _match(text, words):
+        async with api._async_api.begin() as conn:
+            return await conn.scalar(sa.select(sa.func.RegexpWord(words, sa.literal(text))))
+
+    for text, words, expected in REGEXP_WORD_CASES:
+        assert bool(api._loop.run_until_complete(_match(text, words))) == expected, (text, words)
 
 
 @pytest.mark.parametrize('logtype', ['text', 'html'])

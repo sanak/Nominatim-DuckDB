@@ -362,7 +362,11 @@ def _duckdb_restrict(element: Restrict, compiler: 'sa.Compiled', **kw: Any) -> s
 @compiles(RegexpWord, DIALECT)
 def _duckdb_regexp_word(element: RegexpWord, compiler: 'sa.Compiled', **kw: Any) -> str:
     words, text = (compiler.process(c, **kw) for c in element.clauses)
-    return f"regexp_matches({text}, '\\b(' || {words} || ')\\b', 'i')"
+    # '\b' of RE2 only knows ASCII word characters. Use explicit Unicode
+    # word boundaries instead, like '\m'/'\M' in PostgreSQL and '\b' in
+    # Python, so that e.g. '1' does not match in '1番地'.
+    return (f"regexp_matches({text}, '(^|[^\\pL\\pN_])(' || {words}"
+            f" || ')($|[^\\pL\\pN_])', 'i')")
 
 
 @compiles(CategoryMatch, DIALECT)

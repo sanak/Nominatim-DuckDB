@@ -361,6 +361,17 @@ def test_regexp_word(duckdb_search):
     assert duckdb_search.place_ids(t, sa.func.RegexpWord('12A|3', t.c.housenumber)) == [1, 2]
 
 
+@pytest.mark.parametrize('text,words,expected',
+                         [('1番地', '1', False), ('東京駅1', '1', False),
+                          ('丁目3', '3', False), ('ä1', '1', False),
+                          ('１', '１', True), ('1番地', '1番地', True),
+                          ('Ä1', 'ä1', True), ('1-3', '3', True),
+                          ('1 2', '2', True), ('1_2', '1', False)])
+def test_regexp_word_unicode_boundaries(duckdb_search, text, words, expected):
+    sql = sa.select(sa.func.RegexpWord(words, sa.literal(text)))
+    assert duckdb_search.rows(sql)[0][0] == expected
+
+
 @pytest.mark.parametrize('category,expected',
                          [('osm.amenity', [1, 2]),
                           ('osm.amenity.restaurant', [1]),
