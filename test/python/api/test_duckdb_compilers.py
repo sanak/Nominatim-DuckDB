@@ -266,6 +266,7 @@ class _ScanProfiler:
 
     def __init__(self, api, profile, table):
         self.scans = []
+        self.nodes = []
         engine = api._async_api._engine.sync_engine
 
         def _find_scans(node):
@@ -274,6 +275,7 @@ class _ScanProfiler:
             if node.get('operator_type') == 'TABLE_SCAN' \
                and info.get('Table', '').split('.')[-1] == table:
                 self.scans.append(node['operator_rows_scanned'])
+                self.nodes.append(node)
             for child in node.get('children', []):
                 _find_scans(child)
 
@@ -420,6 +422,8 @@ def duckdb_search(apiobj, tmp_path):
                           (lookups.LookupAll, 'name_vector', [1, 2], [1]),
                           (lookups.LookupAll, 'nameaddress_vector', [10], [1, 3]),
                           (lookups.LookupAll, 'name_vector', [2, 99], []),
+                          (lookups.LookupAll, 'name_vector', [3, 3], [1, 2]),
+                          (lookups.LookupAll, 'name_vector', [], []),
                           (lookups.LookupAll, 'name_vector', [99], []),
                           (lookups.LookupAny, 'name_vector', [1, 4], [1, 3]),
                           (lookups.LookupAny, 'nameaddress_vector', [11, 99], [1, 2]),
@@ -541,3 +545,85 @@ def test_word_lookup_prunes_reverse_search_name(tmp_path):
     assert len(profiler.scans) == 3
     for rows in profiler.scans:
         assert rows <= 2 * ROW_GROUP_SIZE
+
+
+def test_search_name_lookup_reads_only_candidates(tmp_path):
+    """ A search for a rare word must only read the vectors of the rows
+        of search_name that contain the word. All other row groups
+        are skipped through the row ids of the candidates.
+    """
+    nplaces = 1000000
+    dbfile = tmp_path / 'search.duckdb'
+    _make_synthetic_db(dbfile, 1, 0.01)
+    con = duckdb.connect(str(dbfile))
+    con.load_extension('spatial')
+    con.execute('SET preserve_insertion_order = true')
+    con.execute('DROP TABLE search_name')
+    # Spatially sorted like the converter does it, so that the place_ids
+    # of the candidates are spread over all row groups. The rare words
+    # 1 to 8 are in the names of 8 places each and word 100 in the
+    # address of every second place.
+    con.execute(f"""CREATE TABLE src AS
+                    SELECT hash(i) % 100000000 AS place_id, 0.0001 * (i % 97) AS importance,
+                           30::SMALLINT AS search_rank, 30::SMALLINT AS address_rank,
+                           ([CASE WHEN i % 125000 < 8 THEN i % 125000 + 1 ELSE 1000 + i END]
+                            || [(2000000 + (i * k) % 70000)::INTEGER for k in range(1, 9)]
+                           )::INTEGER[] AS name_vector,
+                           ([CASE WHEN i % 2 = 0 THEN 100 ELSE 101 END]
+                            || [(3000000 + (i // 100 * 79 + k * 1047) % 20000)::INTEGER
+                                for k in range(1, 50)])::INTEGER[] AS nameaddress_vector,
+                           'jp' AS country_code,
+                           ST_Point(130 + (i * 7919 % 1000) * 0.01,
+                                    30 + (i * 104729 % 1000) * 0.01) AS centroid
+                      FROM range({nplaces}) t(i)""")
+    convert_duckdb.create_sorted_table(con, 'search_name', 'src',
+                                       geom_column=convert_duckdb.BBOX_TABLES['search_name'])
+    con.execute('DROP TABLE src')
+    con.execute('CREATE TABLE src AS ' + convert_duckdb.REVERSE_SEARCH_SQL
+                .replace('GROUP BY', 'WHERE word < 200 GROUP BY'))
+    convert_duckdb.create_sorted_table(con, 'reverse_search_name', 'src',
+                                       order=convert_duckdb.KEY_ORDER['reverse_search_name'])
+    con.execute('DROP TABLE src')
+    con.execute('CHECKPOINT')
+    con.close()
+
+    profile = tmp_path / 'profile.json'
+    api = napi.NominatimAPI(environ={'NOMINATIM_DATABASE_DSN': f'duckdb:dbname={dbfile}'})
+    try:
+        api._loop.run_until_complete(api._async_api.setup_database())
+        profiler = _ScanProfiler(api, profile, 'search_name')
+        t = SearchTables(sa.MetaData()).search_name
+        ranking = FieldRanking('name_vector', 1.0, [RankedTokens(0.1, [3])])
+
+        async def _search(*where):
+            sql = sa.select(t.c.place_id, ranking.sql_penalty(t).label('penalty'))\
+                    .where(*where).order_by(t.c.importance.desc()).limit(1000)
+            async with api._async_api.begin() as conn:
+                return sorted(await conn.execute(sql))
+
+        def search(*where):
+            return api._loop.run_until_complete(_search(*where))
+
+        rows = search(lookups.LookupAll(t, 'name_vector', [3]))
+        expected = sorted(hash_ % 100000000 for hash_ in
+                          (r[0] for r in duckdb.sql(
+                              f'SELECT hash(i) FROM range({nplaces}) t(i)'
+                              ' WHERE i % 125000 = 2').fetchall()))
+        assert [r[0] for r in rows] == expected
+        assert all(r[1] == 0.1 for r in rows)
+        rows = search(lookups.LookupAny(t, 'name_vector', [4, 5]),
+                      lookups.Restrict(t, 'nameaddress_vector', [100]))
+        assert len(rows) == 8
+    finally:
+        api.close()
+
+    print('search_name scans (rows scanned, rows read, filters):',
+          [(n['operator_rows_scanned'], n['operator_cardinality'],
+            n['extra_info'].get('Filters'), n['extra_info'].get('Dynamic Filters', '')[:40])
+           for n in profiler.nodes])
+    vector_scans = [n for n in profiler.nodes if 'name_vector' in n['extra_info']['Projections']]
+    assert len(vector_scans) == 2
+    for node in vector_scans:
+        # Only the vectors that contain a candidate are read.
+        assert 'rowid IN' in node['extra_info'].get('Dynamic Filters', '')
+        assert node['operator_cardinality'] < 0.01 * nplaces

@@ -16,7 +16,8 @@ columns are instead done on the bbox helper columns described in
 `duckdb_layout`, which allow DuckDB to skip row groups through their
 min/max statistics. Lookups of search terms go through the table
 `reverse_search_name`, which is sorted by word, so that only the row
-groups containing the words are read.
+groups containing the words are read. The candidate rows of `search_name`
+are then selected by their row id (see `_word_lookup_sql()`).
 
 Output of geometries in KML format is not supported because DuckDB
 has no function for it. Requesting it raises a UsageError.
@@ -294,9 +295,19 @@ def _duckdb_array_agg(element: ArrayAgg, compiler: 'sa.Compiled', **kw: Any) -> 
     return "list(%s)" % compiler.process(element.clauses, **kw)
 
 
+def _list_has_all_sql(haystack: str, needles: str) -> str:
+    """ SQL for checking that the list `haystack` contains all elements
+        of the list `needles`. Like list_has_all() but much faster for
+        long lists, because list_has_all() builds a hash table for every
+        row. NULL lists do not match.
+    """
+    return (f"(len(list_filter({needles}, lambda tok: list_contains({haystack}, tok)))"
+            f" = len({needles}))")
+
+
 @compiles(ArrayContains, DIALECT)
 def _duckdb_array_contains(element: ArrayContains, compiler: 'sa.Compiled', **kw: Any) -> str:
-    return "list_has_all(%s)" % compiler.process(element.clauses, **kw)
+    return _list_has_all_sql(*(compiler.process(c, **kw) for c in element.clauses))
 
 
 @compiles(ArrayCat, DIALECT)
@@ -314,49 +325,64 @@ def _duckdb_array_cat(element: ArrayCat, compiler: 'sa.Compiled', **kw: Any) -> 
 _register_function(
     'weigh_search', sa.types.NullType,
     "coalesce(CAST(json_extract(list_filter(CAST(CAST({1} AS JSON) AS JSON[]),"
-    " lambda r: list_has_all({0}, CAST(json_extract(r, '$[1]') AS INTEGER[])))[1],"
-    " '$[0]') AS DOUBLE), {2})")
+    " lambda r: " + _list_has_all_sql("{0}", "CAST(json_extract(r, '$[1]') AS INTEGER[])")
+    + ")[1], '$[0]') AS DOUBLE), {2})")
 
 
-def _word_lookup_sql(element: Any, compiler: 'sa.Compiled', select: str, **kw: Any) -> str:
-    """ SQL for selecting `select` from the rows of reverse_search_name
+def _word_lookup_sql(element: Any, compiler: 'sa.Compiled', select: str,
+                     having: str = '', **kw: Any) -> str:
+    """ SQL for finding the rows of search_name with the place ids
+        selected through `select` from the rows of reverse_search_name
         that contain the tokens of the lookup.
 
         The words are compared with IN against a subquery, which DuckDB
         turns into a filter on the table scan that skips all row groups
         without the words (the table is sorted by word).
+
+        The rows of search_name are then selected by their row id: the
+        place ids of the candidates are first looked up in the place_id
+        column alone. When there are only a few candidates (up to the
+        setting dynamic_or_filter_threshold, default 50), DuckDB pushes
+        their row ids into the scan of the outer query, which then only
+        reads the vectors and other columns of the row ranges with
+        candidates. A plain place_id IN (...) reads them for all rows,
+        because the place ids of the candidates are scattered over the
+        spatially sorted table.
     """
-    _, _, colname, tokens = list(element.clauses)
-    return (f'SELECT {select} FROM reverse_search_name'
-            f' WHERE word IN (SELECT unnest({compiler.process(tokens, **kw)}))'
-            f' AND "column" = {compiler.process(colname, **kw)}')
+    place, _, colname, tokens = list(element.clauses)
+    placesql = compiler.process(place, **kw)
+    table = place.table
+    if isinstance(table, sa.sql.expression.Alias):
+        table = table.element
+    assert isinstance(table, sa.Table)
+    words = (f'SELECT {select} FROM reverse_search_name'
+             f' WHERE word IN (SELECT unnest({compiler.process(tokens, **kw)}))'
+             f' AND "column" = {compiler.process(colname, **kw)}{having}')
+    return (f"({placesql[:placesql.rfind('.') + 1]}rowid IN"
+            f" (SELECT rowid FROM {table.name} WHERE place_id IN ({words})))")
 
 
 @compiles(LookupAll, DIALECT)
 def _duckdb_lookup_all(element: LookupAll, compiler: 'sa.Compiled', **kw: Any) -> str:
-    place, col, _, tokens = list(element.clauses)
-    # Intersect the place lists of all words, smallest first. Words that are
-    # not in the table at all do not restrict the result, so the search
-    # vector needs to be checked as well.
-    intersect = _word_lookup_sql(element, compiler,
-                                 "unnest(list_reduce(list(places ORDER BY len(places)),"
-                                 " lambda a, b: list_intersect(a, b)))", **kw)
-    return (f"({compiler.process(place, **kw)} IN ({intersect})"
-            f" AND list_has_all({compiler.process(col, **kw)},"
-            f" {compiler.process(tokens, **kw)}))")
+    tokens = list(element.clauses)[3]
+    # Intersect the place lists of all words, smallest first. When a word
+    # is not in the table at all, then there is no place with all words.
+    return _word_lookup_sql(element, compiler,
+                            "unnest(list_reduce(list(places ORDER BY len(places)),"
+                            " lambda a, b: list_intersect(a, b)))",
+                            having=" HAVING count(*) = len(list_distinct("
+                                   f"{compiler.process(tokens, **kw)}))", **kw)
 
 
 @compiles(LookupAny, DIALECT)
 def _duckdb_lookup_any(element: LookupAny, compiler: 'sa.Compiled', **kw: Any) -> str:
-    place = list(element.clauses)[0]
     # The union of the place lists: the IN removes duplicates.
-    union = _word_lookup_sql(element, compiler, "unnest(places)", **kw)
-    return f"({compiler.process(place, **kw)} IN ({union}))"
+    return _word_lookup_sql(element, compiler, "unnest(places)", **kw)
 
 
 @compiles(Restrict, DIALECT)
 def _duckdb_restrict(element: Restrict, compiler: 'sa.Compiled', **kw: Any) -> str:
-    return "list_has_all(%s)" % compiler.process(element.clauses, **kw)
+    return _list_has_all_sql(*(compiler.process(c, **kw) for c in element.clauses))
 
 
 @compiles(RegexpWord, DIALECT)
