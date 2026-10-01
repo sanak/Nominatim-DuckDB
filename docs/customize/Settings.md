@@ -47,6 +47,22 @@ parameter that is understood by libpq. See the [Postgres documentation](https://
     instead.
 
 
+#### NOMINATIM_DUCKDB_EXTENSION_DIR
+
+| Summary            |                                                     |
+| --------------     | --------------------------------------------------- |
+| **Description:**   | Directory with DuckDB extensions |
+| **Format:**        | path |
+| **Default:**       | _empty_ (DuckDB's default extension directory) |
+| **After Changes:** | restart the frontend |
+
+Only used by the experimental, read-only DuckDB frontend, which is
+selected with a database connection string of the form
+`duckdb:dbname=<path to database file>`. The `spatial` extension must be
+installed in this directory. Extensions are never installed or loaded
+automatically at runtime.
+
+
 #### NOMINATIM_DATABASE_WEBUSER
 
 | Summary            |                                                     |

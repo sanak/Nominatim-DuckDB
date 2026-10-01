@@ -21,12 +21,13 @@ else:
 
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_asyncio
+from sqlalchemy.dialects import registry
 
 from .errors import UsageError
 from .sql.sqlalchemy_schema import SearchTables
 from .sql.async_core_library import PGCORE_LIB, PGCORE_ERROR
 from .config import Configuration
-from .sql import sqlite_functions, sqlalchemy_functions  # noqa
+from .sql import sqlite_functions, sqlalchemy_functions, duckdb_functions  # noqa
 from .connection import SearchConnection
 from .status import get_status, StatusResult
 from .lookup import get_places, get_detailed_place
@@ -35,6 +36,8 @@ from .timeout import Timeout
 from . import search as nsearch
 from . import types as ntyp
 from .results import DetailedResult, ReverseResult, SearchResults
+
+registry.register('duckdb.aioduckdb', 'nominatim_api.sql.duckdb_async', 'AsyncDuckDBDialect')
 
 
 class NominatimAPIAsync:
@@ -103,8 +106,26 @@ class NominatimAPIAsync:
                 extra_args['pool_size'] = self.config.get_int('API_POOL_SIZE')
 
             is_sqlite = self.config.DATABASE_DSN.startswith('sqlite:')
+            is_duckdb = self.config.DATABASE_DSN.startswith('duckdb:')
 
-            if is_sqlite:
+            if is_duckdb:
+                params = dict((p.split('=', 1)
+                              for p in self.config.DATABASE_DSN[7:].split(';')))
+                dbfile = params.get('dbname', '')
+                is_rw = 'NOMINATIM_DATABASE_RW' in self.config.environ \
+                        and self.config.get_bool('DATABASE_RW')
+                if not is_rw and not Path(dbfile).is_file():
+                    raise UsageError(f"DuckDB database '{dbfile}' does not exist.")
+
+                dburl = sa.engine.URL.create('duckdb+aioduckdb', database=dbfile)
+                duckdb_config = {'temp_directory': '/tmp/duckdb',
+                                 'autoinstall_known_extensions': False,
+                                 'autoload_known_extensions': False}
+                if self.config.DUCKDB_EXTENSION_DIR:
+                    duckdb_config['extension_directory'] = self.config.DUCKDB_EXTENSION_DIR
+                extra_args['connect_args'] = {'read_only': not is_rw,
+                                              'config': duckdb_config}
+            elif is_sqlite:
                 params = dict((p.split('=', 1)
                               for p in self.config.DATABASE_DSN[7:].split(';')))
                 dburl = sa.engine.URL.create('sqlite+aiosqlite',
@@ -130,7 +151,15 @@ class NominatimAPIAsync:
 
             engine = sa_asyncio.create_async_engine(dburl, **extra_args)
 
-            if is_sqlite:
+            if is_duckdb:
+                server_version = 0
+
+                @sa.event.listens_for(engine.sync_engine, "connect")
+                def _on_duckdb_connect(dbapi_con: Any, _: Any) -> None:
+                    cursor = dbapi_con.cursor()
+                    cursor.execute('LOAD spatial')
+                    duckdb_functions.install_custom_functions(dbapi_con)
+            elif is_sqlite:
                 server_version = 0
 
                 @sa.event.listens_for(engine.sync_engine, "connect")
