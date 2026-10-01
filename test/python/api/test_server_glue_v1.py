@@ -704,7 +704,6 @@ class TestKMLOutputOnBackends:
         params.update({'polygon_kml': '1', 'format': 'json'})
         return api._loop.run_until_complete(endpoint(api._async_api, FakeAdaptor(params=params)))
 
-    @pytest.mark.duckdb_ok
     @pytest.mark.parametrize('endpoint,params',
                              [(glue.reverse_endpoint, {'lat': '34', 'lon': '23'}),
                               (glue.lookup_endpoint, {'osm_ids': 'W4'})])

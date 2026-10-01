@@ -13,8 +13,6 @@ import pytest
 
 import nominatim_api as napi
 
-pytestmark = pytest.mark.duckdb_ok
-
 
 def test_lookup_empty_list(apiobj, frontend):
     api = frontend(apiobj, options={'details'})

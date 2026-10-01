@@ -16,8 +16,6 @@ from fake_adaptor import FakeAdaptor
 
 import nominatim_api.v1.server_glue as glue
 
-pytestmark = pytest.mark.duckdb_ok
-
 
 class TestPolygonsEndPoint:
 

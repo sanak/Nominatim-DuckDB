@@ -190,11 +190,6 @@ def apiobj(temp_db_with_extensions, temp_db_conn, monkeypatch):
     testapi.api.close()
 
 
-def pytest_configure(config):
-    config.addinivalue_line(
-        'markers', 'duckdb_ok: test is expected to pass on the DuckDB frontend fixture')
-
-
 @pytest.fixture
 def is_duckdb(request):
     """ True, when the test runs against the DuckDB variant of 'frontend'.
@@ -209,10 +204,6 @@ def frontend(request, tmp_path):
     if request.param in ('sqlite_db', 'duckdb_db'):
         kind = request.param[:-3]
         if kind == 'duckdb':
-            # Central switch while the DuckDB frontend is incomplete:
-            # tests opt in with the 'duckdb_ok' marker.
-            if not request.node.get_closest_marker('duckdb_ok'):
-                pytest.xfail('DuckDB support pending')
             pytest.importorskip('duckdb')
             pytest.importorskip('duckdb_engine')
             from nominatim_db.tools import convert_duckdb

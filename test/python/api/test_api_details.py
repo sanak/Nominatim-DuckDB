@@ -13,8 +13,6 @@ import pytest
 
 import nominatim_api as napi
 
-pytestmark = pytest.mark.duckdb_ok
-
 
 @pytest.mark.parametrize('idobj', (napi.PlaceID(332), napi.OsmID('W', 4),
                                    napi.OsmID('W', 4, 'highway')))

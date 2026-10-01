@@ -18,8 +18,6 @@ import nominatim_api as napi
 
 API_OPTIONS = {'reverse'}
 
-pytestmark = pytest.mark.duckdb_ok
-
 
 def test_reverse_rank_30(apiobj, frontend):
     apiobj.add_placex(place_id=223, class_='place', type='house',

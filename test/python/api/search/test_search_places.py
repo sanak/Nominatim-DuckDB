@@ -125,9 +125,15 @@ class TestNameOnlySearches:
                                       napi.GeometryFormat.KML,
                                       napi.GeometryFormat.SVG,
                                       napi.GeometryFormat.TEXT])
-    def test_return_geometries(self, apiobj, frontend, geom):
+    def test_return_geometries(self, apiobj, frontend, is_duckdb, geom):
         lookup = FieldLookup('name_vector', [20], LookupAll)
         ranking = FieldRanking('name_vector', 0.4, [RankedTokens(0.0, [21])])
+
+        if is_duckdb and geom == napi.GeometryFormat.KML:
+            with pytest.raises(napi.UsageError, match='KML'):
+                run_search(apiobj, frontend, 0.1, [lookup], [ranking],
+                           details=SearchDetails(geometry_output=geom))
+            return
 
         results = run_search(apiobj, frontend, 0.1, [lookup], [ranking],
                              details=SearchDetails(geometry_output=geom))

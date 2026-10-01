@@ -107,7 +107,8 @@ class TestPostcodeSearchWithAddress:
 
         results = run_search(apiobj, frontend, 0.1, ['12345'], lookup=[lookup], ranking=[ranking])
 
-        assert [r.place_id for r in results] == [100, 101]
+        # Both results have the same accuracy, their order is undefined.
+        assert sorted(r.place_id for r in results) == [100, 101]
 
     def test_restrict_by_name(self, apiobj, frontend):
         lookup = FieldLookup('name_vector', [10], 'restrict')
@@ -133,7 +134,13 @@ class TestPostcodeSearchWithAddress:
                                       napi.GeometryFormat.KML,
                                       napi.GeometryFormat.SVG,
                                       napi.GeometryFormat.TEXT])
-    def test_return_geometries(self, apiobj, frontend, geom):
+    def test_return_geometries(self, apiobj, frontend, is_duckdb, geom):
+        if is_duckdb and geom == napi.GeometryFormat.KML:
+            with pytest.raises(napi.UsageError, match='KML'):
+                run_search(apiobj, frontend, 0.1, ['12345'],
+                           details=SearchDetails(geometry_output=geom))
+            return
+
         results = run_search(apiobj, frontend, 0.1, ['12345'],
                              details=SearchDetails(geometry_output=geom))
 

@@ -151,8 +151,14 @@ class TestStreetWithHousenumber:
                                       napi.GeometryFormat.KML,
                                       napi.GeometryFormat.SVG,
                                       napi.GeometryFormat.TEXT])
-    def test_return_geometries(self, apiobj, frontend, geom):
+    def test_return_geometries(self, apiobj, frontend, is_duckdb, geom):
         lookup = FieldLookup('name_vector', [1, 2], LookupAll)
+
+        if is_duckdb and geom == napi.GeometryFormat.KML:
+            with pytest.raises(napi.UsageError, match='KML'):
+                run_search(apiobj, frontend, 0.1, [lookup], [], hnrs=['20', '21', '22'],
+                           details=SearchDetails(geometry_output=geom))
+            return
 
         results = run_search(apiobj, frontend, 0.1, [lookup], [], hnrs=['20', '21', '22'],
                              details=SearchDetails(geometry_output=geom))
@@ -214,8 +220,14 @@ class TestInterpolations:
                                       napi.GeometryFormat.KML,
                                       napi.GeometryFormat.SVG,
                                       napi.GeometryFormat.TEXT])
-    def test_osmline_with_geometries(self, apiobj, frontend, geom):
+    def test_osmline_with_geometries(self, apiobj, frontend, is_duckdb, geom):
         lookup = FieldLookup('name_vector', [111], LookupAll)
+
+        if is_duckdb and geom == napi.GeometryFormat.KML:
+            with pytest.raises(napi.UsageError, match='KML'):
+                run_search(apiobj, frontend, 0.1, [lookup], [], hnrs=['21'],
+                           details=SearchDetails(geometry_output=geom))
+            return
 
         results = run_search(apiobj, frontend, 0.1, [lookup], [], hnrs=['21'],
                              details=SearchDetails(geometry_output=geom))
@@ -259,8 +271,14 @@ class TestTiger:
                                       napi.GeometryFormat.KML,
                                       napi.GeometryFormat.SVG,
                                       napi.GeometryFormat.TEXT])
-    def test_tiger_with_geometries(self, apiobj, frontend, geom):
+    def test_tiger_with_geometries(self, apiobj, frontend, is_duckdb, geom):
         lookup = FieldLookup('name_vector', [111], LookupAll)
+
+        if is_duckdb and geom == napi.GeometryFormat.KML:
+            with pytest.raises(napi.UsageError, match='KML'):
+                run_search(apiobj, frontend, 0.1, [lookup], [], hnrs=['21'],
+                           details=SearchDetails(geometry_output=geom))
+            return
 
         results = run_search(apiobj, frontend, 0.1, [lookup], [], hnrs=['21'],
                              details=SearchDetails(geometry_output=geom))

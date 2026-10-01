@@ -12,6 +12,7 @@ Functional tests can be found in the BDD test suite.
 """
 import pytest
 
+import nominatim_api as napi
 import nominatim_api.logging as loglib
 
 API_OPTIONS = {'search'}
@@ -48,6 +49,37 @@ def test_search_simple_word(apiobj, frontend):
     results = api.search('TEST')
 
     assert [r.place_id for r in results] == [444]
+
+
+def test_search_japanese_name(apiobj, frontend):
+    apiobj.add_word_table([(101, '東京駅', 'W', '東京駅', None),
+                           (102, '東京駅', 'w', '東京駅', None),
+                           (103, '丸の内', 'W', '丸の内', None),
+                           (104, '丸の内', 'w', '丸の内', None)])
+
+    apiobj.add_placex(place_id=500, class_='railway', type='station',
+                      name={'name': '東京駅', 'name:en': 'Tokyo Station'},
+                      centroid=(139.7671, 35.6812))
+    apiobj.add_search_name(500, names=[101, 102], address=[103, 104],
+                           centroid=(139.7671, 35.6812))
+    apiobj.add_placex(place_id=501, class_='place', type='quarter', name='丸の内',
+                      rank_search=20, rank_address=20,
+                      centroid=(139.7638, 35.6825))
+    apiobj.add_search_name(501, names=[103, 104], search_rank=20, address_rank=20,
+                           centroid=(139.7638, 35.6825))
+
+    api = frontend(apiobj, options=API_OPTIONS)
+
+    results = api.search('東京駅')
+    assert [r.place_id for r in results] == [500]
+    assert results[0].names['name'] == '東京駅'
+
+    assert [r.place_id for r in api.search('東京駅, 丸の内')] == [500]
+    assert [r.place_id for r in api.search('丸の内')][0] == 501
+
+    details = api.details(napi.PlaceID(500), keywords=True)
+    assert {w.word for w in details.name_keywords} == {'東京駅'}
+    assert {w.word for w in details.address_keywords} == {'丸の内'}
 
 
 @pytest.mark.parametrize('logtype', ['text', 'html'])

@@ -93,7 +93,13 @@ class TestCountryParameters:
                                       napi.GeometryFormat.SVG,
                                       napi.GeometryFormat.TEXT])
     @pytest.mark.parametrize('cc', ['yw', 'ro'])
-    def test_return_geometries(self, apiobj, frontend, geom, cc):
+    def test_return_geometries(self, apiobj, frontend, is_duckdb, geom, cc):
+        if is_duckdb and geom == napi.GeometryFormat.KML:
+            with pytest.raises(napi.UsageError, match='KML'):
+                run_search(apiobj, frontend, 0.5, [cc],
+                           details=SearchDetails(geometry_output=geom))
+            return
+
         results = run_search(apiobj, frontend, 0.5, [cc],
                              details=SearchDetails(geometry_output=geom))
 
