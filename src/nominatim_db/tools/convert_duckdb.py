@@ -27,6 +27,8 @@ on DuckDB skipping row groups through their min/max statistics instead:
     of the table as bounds.
   * Tables accessed by key are sorted by that key (`word` by word_token,
     `reverse_search_name` by word, `place_addressline` by place_id).
+  * The search relies on place_id being unique in `search_name` (as the
+    unique index in PostgreSQL guarantees), which is checked after copying.
 
 Data is converted as follows: geometries via WKB, hstore and JSON columns
 to JSON, integer arrays to INTEGER[] and category (ltree) arrays to VARCHAR[].
@@ -380,3 +382,17 @@ class DuckDBWriter:
                             order=KEY_ORDER.get(name),
                             extra_columns=EXTRA_BBOX_COLUMNS.get(name, ()))
         self.dest.execute(f'DROP TABLE stage."{name}"')
+        if name == 'search_name':
+            check_unique_place_ids(self.dest)
+
+
+def check_unique_place_ids(con: 'duckdb.DuckDBPyConnection') -> None:
+    """ Make sure that place_id is unique in search_name. The search
+        selects the rows of search_name by place_id via reverse_search_name
+        and does not check the search vectors again. PostgreSQL guarantees
+        this through the unique index idx_search_name_place_id.
+    """
+    row = con.execute('SELECT count(*) - count(DISTINCT place_id) FROM search_name').fetchone()
+    if row is not None and row[0] != 0:
+        raise UsageError(f"Table search_name of the source database has {row[0]}"
+                         " duplicate place_ids. Cannot convert.")

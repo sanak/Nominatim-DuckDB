@@ -299,7 +299,8 @@ def _list_has_all_sql(haystack: str, needles: str) -> str:
     """ SQL for checking that the list `haystack` contains all elements
         of the list `needles`. Like list_has_all() but much faster for
         long lists, because list_has_all() builds a hash table for every
-        row. NULL lists do not match.
+        row. A NULL haystack gives false for non-empty needles and true
+        for empty ones (list_has_all() gives NULL), the same in a WHERE.
     """
     return (f"(len(list_filter({needles}, lambda tok: list_contains({haystack}, tok)))"
             f" = len({needles}))")
@@ -348,6 +349,11 @@ def _word_lookup_sql(element: Any, compiler: 'sa.Compiled', select: str,
         candidates. A plain place_id IN (...) reads them for all rows,
         because the place ids of the candidates are scattered over the
         spatially sorted table.
+
+        The vectors of the selected rows are not checked again, so this
+        relies on place_id being unique in search_name: a row with the
+        place_id of a candidate is taken to contain the words. PostgreSQL
+        has a unique index on the column and the converter checks it.
     """
     place, _, colname, tokens = list(element.clauses)
     placesql = compiler.process(place, **kw)
@@ -367,6 +373,8 @@ def _duckdb_lookup_all(element: LookupAll, compiler: 'sa.Compiled', **kw: Any) -
     tokens = list(element.clauses)[3]
     # Intersect the place lists of all words, smallest first. When a word
     # is not in the table at all, then there is no place with all words.
+    # The search vector itself is not checked: place_id must be unique
+    # in search_name (see _word_lookup_sql()).
     return _word_lookup_sql(element, compiler,
                             "unnest(list_reduce(list(places ORDER BY len(places)),"
                             " lambda a, b: list_intersect(a, b)))",

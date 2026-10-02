@@ -562,9 +562,10 @@ def test_search_name_lookup_reads_only_candidates(tmp_path):
     # Spatially sorted like the converter does it, so that the place_ids
     # of the candidates are spread over all row groups. The rare words
     # 1 to 8 are in the names of 8 places each and word 100 in the
-    # address of every second place.
+    # address of every second place. The place_ids must be unique and
+    # are scattered (1000003 is a prime).
     con.execute(f"""CREATE TABLE src AS
-                    SELECT hash(i) % 100000000 AS place_id, 0.0001 * (i % 97) AS importance,
+                    SELECT (i * 7919) % 1000003 AS place_id, 0.0001 * (i % 97) AS importance,
                            30::SMALLINT AS search_rank, 30::SMALLINT AS address_rank,
                            ([CASE WHEN i % 125000 < 8 THEN i % 125000 + 1 ELSE 1000 + i END]
                             || [(2000000 + (i * k) % 70000)::INTEGER for k in range(1, 9)]
@@ -579,6 +580,8 @@ def test_search_name_lookup_reads_only_candidates(tmp_path):
     convert_duckdb.create_sorted_table(con, 'search_name', 'src',
                                        geom_column=convert_duckdb.BBOX_TABLES['search_name'])
     con.execute('DROP TABLE src')
+    assert con.execute('SELECT count(DISTINCT place_id) = count(*)'
+                       ' FROM search_name').fetchone()[0]
     con.execute('CREATE TABLE src AS ' + convert_duckdb.REVERSE_SEARCH_SQL
                 .replace('GROUP BY', 'WHERE word < 200 GROUP BY'))
     convert_duckdb.create_sorted_table(con, 'reverse_search_name', 'src',
@@ -605,10 +608,7 @@ def test_search_name_lookup_reads_only_candidates(tmp_path):
             return api._loop.run_until_complete(_search(*where))
 
         rows = search(lookups.LookupAll(t, 'name_vector', [3]))
-        expected = sorted(hash_ % 100000000 for hash_ in
-                          (r[0] for r in duckdb.sql(
-                              f'SELECT hash(i) FROM range({nplaces}) t(i)'
-                              ' WHERE i % 125000 = 2').fetchall()))
+        expected = sorted((i * 7919) % 1000003 for i in range(2, nplaces, 125000))
         assert [r[0] for r in rows] == expected
         assert all(r[1] == 0.1 for r in rows)
         rows = search(lookups.LookupAny(t, 'name_vector', [4, 5]),

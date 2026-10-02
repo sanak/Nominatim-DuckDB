@@ -180,3 +180,14 @@ def test_connect_missing_spatial_extension(tmp_path):
 
     assert list(extdir.iterdir()) == []  # nothing was downloaded
     assert not outfile.exists()
+
+
+@pytest.mark.parametrize('ids,ok', [([1, 2, 3], True), ([1, 2, 2], False)])
+def test_check_unique_place_ids(ids, ok):
+    con = duckdb.connect()
+    con.execute('CREATE TABLE search_name AS SELECT unnest(?::BIGINT[]) AS place_id', [ids])
+    if ok:
+        convert_duckdb.check_unique_place_ids(con)
+    else:
+        with pytest.raises(UsageError, match='1 duplicate place_ids'):
+            convert_duckdb.check_unique_place_ids(con)
