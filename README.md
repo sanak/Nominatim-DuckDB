@@ -1,4 +1,32 @@
-[![Build Status](https://github.com/osm-search/Nominatim/workflows/CI%20Tests/badge.svg)](https://github.com/osm-search/Nominatim/actions?query=workflow%3A%22CI+Tests%22)
+[![Build Status](https://github.com/sanak/Nominatim-DuckDB/actions/workflows/ci-tests.yml/badge.svg?branch=duckdb)](https://github.com/sanak/Nominatim-DuckDB/actions/workflows/ci-tests.yml?query=branch%3Aduckdb)
+
+Nominatim-DuckDB
+================
+
+This is a fork of [Nominatim](https://github.com/osm-search/Nominatim) with
+an experimental, read-only DuckDB backend for the Python frontend. A
+Nominatim database imported into PostgreSQL can be converted into a single
+DuckDB file, which then serves search, reverse and lookup queries without
+a PostgreSQL server.
+
+* The default branch `duckdb` contains the DuckDB backend on top of
+  upstream. The branch `master` mirrors upstream `master` unchanged.
+* See [Conversion to DuckDB](docs/customize/DuckDB.md) for the
+  prerequisites, the conversion and the limitations.
+* This fork is developed with AI assistance (Claude Opus).
+* Please report problems with the DuckDB backend in this repository, not
+  upstream.
+
+Quick start: clone this repository into a directory called `Nominatim` and
+follow the upstream steps under [Installation](#installation) to import
+your data into PostgreSQL. Then, from the project directory:
+
+    ../nominatim-venv/bin/pip install '../packaging/nominatim-api[duckdb]' uvicorn falcon
+    ../nominatim-venv/bin/python -c "import duckdb; duckdb.connect().install_extension('spatial')"
+    ../nominatim-venv/bin/nominatim convert --format duckdb -o nominatim.duckdb
+    NOMINATIM_DATABASE_DSN=duckdb:dbname=nominatim.duckdb ../nominatim-venv/bin/nominatim serve
+
+The rest of this file is the upstream README.
 
 Nominatim
 =========
