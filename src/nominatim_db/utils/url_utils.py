@@ -2,12 +2,11 @@
 #
 # This file is part of Nominatim. (https://nominatim.org)
 #
-# Copyright (C) 2024 by the Nominatim developer community.
+# Copyright (C) 2026 by the Nominatim developer community.
 # For a full list of authors see the git log.
 """
 Helper functions for accessing URL.
 """
-from typing import IO  # noqa
 import logging
 import urllib.request as urlrequest
 
@@ -25,8 +24,9 @@ def get_url(url: str) -> str:
 
     try:
         request = urlrequest.Request(url, headers=headers)
-        with urlrequest.urlopen(request) as response:  # type: IO[bytes]
-            return response.read().decode('utf-8')
+        with urlrequest.urlopen(request) as response:
+            content: bytes = response.read()
+            return content.decode('utf-8')
     except Exception:
         LOG.fatal('Failed to load URL: %s', url)
         raise
