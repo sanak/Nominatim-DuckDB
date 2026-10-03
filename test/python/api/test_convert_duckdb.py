@@ -15,7 +15,8 @@ duckdb = pytest.importorskip('duckdb')
 pytest.importorskip('duckdb_engine')
 
 from nominatim_api.sql.duckdb_layout import (BBOX_TABLES, bbox_columns,  # noqa: E402
-                                             table_bbox_columns)
+                                             table_bbox_columns, LAYOUT_VERSION,
+                                             LAYOUT_VERSION_PROPERTY)
 from nominatim_db.tools import convert_duckdb  # noqa: E402
 from nominatim_db.errors import UsageError  # noqa: E402
 
@@ -135,6 +136,12 @@ def test_convert_reverse_search_name_one_row_per_word_and_place(converted):
     assert rows == sorted(expected)
     assert ('name_vector', 10, 1) in rows
     assert rows.count(('name_vector', 7, 5)) == 1
+
+
+def test_convert_sets_layout_version(converted):
+    _, con = converted
+    assert con.execute('SELECT value FROM nominatim_properties WHERE property = ?',
+                       (LAYOUT_VERSION_PROPERTY, )).fetchall() == [(str(LAYOUT_VERSION), )]
 
 
 def test_convert_placex_rowids(converted):

@@ -37,8 +37,16 @@ threshold, DuckDB falls back to the place_id filter.
 from typing import Dict, Tuple
 
 import sqlalchemy as sa
+import sqlalchemy.ext.asyncio as sa_asyncio
 
+from ..errors import UsageError
 from ..typing import SaColumn
+
+# Version of the layout described here. Increase it whenever a change of
+# the layout needs a new conversion of existing databases. The converter
+# saves it in nominatim_properties under LAYOUT_VERSION_PROPERTY.
+LAYOUT_VERSION = 1
+LAYOUT_VERSION_PROPERTY = 'duckdb_layout_version'
 
 # Geometry columns that are stored as points only.
 POINT_COLUMNS = ('centroid', )
@@ -66,6 +74,25 @@ EXTRA_BBOX_COLUMNS: Dict[str, Tuple[str, ...]] = {
 
 # Table mapping place_id to the row id of the place in placex (`rid`).
 PLACEX_ROWID_TABLE = 'placex_rowids'
+
+
+async def check_layout_version(conn: sa_asyncio.AsyncConnection, dbfile: str) -> None:
+    """ Make sure that a database created by `nominatim convert` has the
+        layout of this version of the frontend. Files without the table
+        nominatim_properties are not Nominatim databases and are not checked.
+    """
+    if not await conn.scalar(sa.text("SELECT count(*) FROM duckdb_tables()"
+                                     " WHERE table_name = 'nominatim_properties'")):
+        return
+
+    version = await conn.scalar(sa.text("SELECT max(value) FROM nominatim_properties"
+                                        " WHERE property = :name"),
+                                {'name': LAYOUT_VERSION_PROPERTY})
+    if version != str(LAYOUT_VERSION):
+        raise UsageError(f"DuckDB database '{dbfile}' has layout version"
+                         f" {version or 'unknown'}, but this version of Nominatim needs"
+                         f" layout version {LAYOUT_VERSION}. Create the database again"
+                         " with 'nominatim convert'.")
 
 
 def placex_rowids() -> 'sa.TableClause':

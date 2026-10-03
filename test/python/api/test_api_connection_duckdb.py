@@ -15,6 +15,7 @@ import pytest
 import sqlalchemy as sa
 
 import nominatim_api as napi
+from nominatim_api.sql.duckdb_layout import LAYOUT_VERSION, LAYOUT_VERSION_PROPERTY
 
 duckdb = pytest.importorskip('duckdb')
 pytest.importorskip('duckdb_engine')
@@ -88,6 +89,8 @@ def test_duckdb_sync_api_status(duckdb_file):
         conn.execute("INSERT INTO import_status VALUES ('2022-12-07 14:14:46+00')")
         conn.execute('CREATE TABLE nominatim_properties (property TEXT, value TEXT)')
         conn.execute("INSERT INTO nominatim_properties VALUES ('database_version', '5.3.99-0')")
+        conn.execute("INSERT INTO nominatim_properties VALUES (?, ?)",
+                     (LAYOUT_VERSION_PROPERTY, str(LAYOUT_VERSION)))
 
     with napi.NominatimAPI(
             environ={'NOMINATIM_DATABASE_DSN': f'duckdb:dbname={duckdb_file}'}) as api:
@@ -103,4 +106,18 @@ def test_duckdb_missing_file_raises(tmp_path):
             environ={'NOMINATIM_DATABASE_DSN':
                      f'duckdb:dbname={tmp_path / "no.duckdb"}'}) as api:
         with pytest.raises(napi.UsageError, match='DuckDB'):
+            api.status()
+
+
+@pytest.mark.parametrize('version', [None, str(LAYOUT_VERSION - 1), str(LAYOUT_VERSION + 1)])
+def test_duckdb_layout_version_mismatch_raises(duckdb_file, version):
+    with duckdb.connect(str(duckdb_file)) as conn:
+        conn.execute('CREATE TABLE nominatim_properties (property TEXT, value TEXT)')
+        if version is not None:
+            conn.execute("INSERT INTO nominatim_properties VALUES (?, ?)",
+                         (LAYOUT_VERSION_PROPERTY, version))
+
+    with napi.NominatimAPI(
+            environ={'NOMINATIM_DATABASE_DSN': f'duckdb:dbname={duckdb_file}'}) as api:
+        with pytest.raises(napi.UsageError, match='nominatim convert'):
             api.status()

@@ -29,6 +29,7 @@ from .sql.async_core_library import PGCORE_LIB, PGCORE_ERROR
 from .config import Configuration
 from .sql import sqlite_functions, sqlalchemy_functions, duckdb_functions  # noqa
 from .sql import duckdb_compilers  # noqa
+from .sql import duckdb_layout
 from .connection import SearchConnection
 from .status import get_status, StatusResult
 from .lookup import get_places, get_detailed_place
@@ -160,6 +161,13 @@ class NominatimAPIAsync:
                     cursor = dbapi_con.cursor()
                     cursor.execute('LOAD spatial')
                     duckdb_functions.install_custom_functions(dbapi_con)
+
+                try:
+                    async with engine.begin() as conn:
+                        await duckdb_layout.check_layout_version(conn, dbfile)
+                except BaseException:
+                    await engine.dispose()
+                    raise
             elif is_sqlite:
                 server_version = 0
 

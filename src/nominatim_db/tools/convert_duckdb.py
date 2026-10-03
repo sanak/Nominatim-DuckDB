@@ -61,6 +61,7 @@ import nominatim_api as napi
 from nominatim_api.search.query_analyzer_factory import make_query_analyzer
 from nominatim_api.sql.duckdb_layout import (BBOX_TABLES, EXTRA_BBOX_COLUMNS,
                                              POINT_COLUMNS, PLACEX_ROWID_TABLE,
+                                             LAYOUT_VERSION, LAYOUT_VERSION_PROPERTY,
                                              bbox_columns, reverse_place_diameter_sql)
 from nominatim_api.sql.sqlalchemy_types import (Geometry, IntArray, KeyValueStore,
                                                 CategoryArray, Json)
@@ -311,6 +312,8 @@ class DuckDBWriter:
             if 'search' in self.options:
                 LOG.warning('Creating reverse search table')
                 self.create_derived_table('reverse_search_name', REVERSE_SEARCH_SQL)
+
+            set_layout_version(self.dest)
         finally:
             self.dest.execute('DETACH stage')
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -393,6 +396,16 @@ class DuckDBWriter:
             check_unique_place_ids(self.dest)
         elif name == 'placex':
             create_placex_rowids(self.dest)
+
+
+def set_layout_version(con: 'duckdb.DuckDBPyConnection') -> None:
+    """ Save the version of the layout in nominatim_properties, so that
+        the frontend can refuse files of another layout.
+    """
+    con.execute('DELETE FROM nominatim_properties WHERE property = ?',
+                (LAYOUT_VERSION_PROPERTY, ))
+    con.execute('INSERT INTO nominatim_properties (property, value) VALUES (?, ?)',
+                (LAYOUT_VERSION_PROPERTY, str(LAYOUT_VERSION)))
 
 
 def create_placex_rowids(con: 'duckdb.DuckDBPyConnection') -> None:

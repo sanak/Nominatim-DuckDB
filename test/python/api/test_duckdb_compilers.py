@@ -277,6 +277,7 @@ def _make_synthetic_db(dbfile, nside, step, place_id='i'):
                                                                        .get(name, ()))
         con.execute(f'DROP TABLE src_{name}')
     convert_duckdb.create_placex_rowids(con)
+    convert_duckdb.set_layout_version(con)
     con.execute('CHECKPOINT')
     con.close()
 
@@ -314,6 +315,10 @@ class _ScanProfiler:
             if table in statement and statement_filter in statement:
                 with open(profile, encoding='utf-8') as fd:
                     _find_scans(json.load(fd))
+
+        # The setup of the database already opened a connection
+        # without profiling. Close it, so that new ones are made.
+        api._loop.run_until_complete(api._async_api._engine.dispose())
 
 
 def test_reverse_prunes_placex_row_groups(tmp_path):
