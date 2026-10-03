@@ -49,6 +49,7 @@ nav:
         - 'External data: US housenumbers from TIGER': 'customize/Tiger.md'
         - 'External data: Postcodes': 'customize/Postcodes.md'
         - 'Conversion to SQLite': 'customize/SQLite.md'
+        - 'Conversion to DuckDB': 'customize/DuckDB.md'
     - 'Library Guide':
         - 'Getting Started': 'library/Getting-Started.md'
         - 'Nominatim API class': 'library/NominatimAPI.md'
