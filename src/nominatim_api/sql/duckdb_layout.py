@@ -21,8 +21,24 @@ The bbox helper columns of a geometry column `<col>` are named:
 
 Use `table_bbox_columns()` to find out which geometry columns of a table
 have bbox helper columns.
+
+Places are read from placex by row id where only a few place_ids are
+needed. A join on place_id gets only an optional dynamic filter, which
+DuckDB uses to skip row groups but not rows. The place_ids are scattered
+over the spatially sorted table, so such a join reads the full rows of
+hundreds of thousands of places. A join on the row id with up to
+`dynamic_or_filter_threshold` (default 50) rows reads only the vectors
+that contain the places. The table `placex_rowids` (see
+`placex_rowids()`) gives the row id for a place_id and is sorted by
+place_id, so that a lookup in it reads only the row groups of the ids.
+Join both on place_id and on the row id: with more rows than the
+threshold, DuckDB falls back to the place_id filter.
 """
 from typing import Dict, Tuple
+
+import sqlalchemy as sa
+
+from ..typing import SaColumn
 
 # Geometry columns that are stored as points only.
 POINT_COLUMNS = ('centroid', )
@@ -46,6 +62,24 @@ BBOX_TABLES: Dict[str, str] = {
 EXTRA_BBOX_COLUMNS: Dict[str, Tuple[str, ...]] = {
     'placex': ('centroid', ),
 }
+
+
+# Table mapping place_id to the row id of the place in placex (`rid`).
+PLACEX_ROWID_TABLE = 'placex_rowids'
+
+
+def placex_rowids() -> 'sa.TableClause':
+    """ Return the table that maps the place_ids of placex to the row
+        ids of the places (columns `place_id` and `rid`).
+    """
+    return sa.table(PLACEX_ROWID_TABLE, sa.column('place_id', sa.BigInteger),
+                    sa.column('rid', sa.BigInteger))
+
+
+def placex_rowid() -> SaColumn:
+    """ Return the row id column of the (unaliased) placex table.
+    """
+    return sa.literal_column('placex.rowid', sa.BigInteger)
 
 
 def table_bbox_columns(table: str) -> Tuple[str, ...]:

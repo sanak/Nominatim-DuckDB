@@ -23,6 +23,7 @@ import sqlalchemy as sa
 
 from .typing import SaSelect, SaRow, SaFromClause
 from .sql.sqlalchemy_types import Geometry
+from .sql.duckdb_layout import placex_rowids, placex_rowid
 from .types import Point, Bbox, LookupDetails, EntranceDetails
 from .connection import SearchConnection
 from .logging import log
@@ -590,7 +591,8 @@ async def complete_address_details(conn: SearchConnection, results: List[BaseRes
     t = conn.t.placex
     taddr = conn.t.addressline
 
-    if conn.connection.dialect.name == 'duckdb':
+    is_duckdb = conn.connection.dialect.name == 'duckdb'
+    if is_duckdb:
         # DuckDB cannot use a hash join for the OR condition below and would
         # read all of place_addressline. Join with one row per lookup id instead.
         lids = sa.func.list_distinct(sa.func.list_value(ltab.c.value['pid'].as_integer(),
@@ -608,21 +610,29 @@ async def complete_address_details(conn: SearchConnection, results: List[BaseRes
                     sa.case((t.c.type == 'postal_code', 5),
                             else_=t.c.rank_address).label('rank_address'),
                     taddr.c.distance, t.c.country_code, t.c.postcode)\
-            .join(taddr, addr_join)\
-            .join(t, taddr.c.address_place_id == t.c.place_id)\
-            .order_by('src_place_id')\
-            .order_by(sa.column('rank_address').desc())\
-            .order_by((taddr.c.place_id == ltab.c.value['pid'].as_integer()).desc())\
-            .order_by(sa.case((sa.func.CrosscheckNames(t.c.name, ltab.c.value['names']), 2),
-                              (taddr.c.isaddress, 0),
-                              (sa.and_(taddr.c.fromarea,
-                                       t.c.geometry.ST_Contains(
-                                           sa.func.ST_GeomFromEWKT(
-                                               ltab.c.value['c'].as_string()))), 1),
-                              else_=-1).desc())\
-            .order_by(taddr.c.fromarea.desc())\
-            .order_by(taddr.c.distance.desc())\
-            .order_by(t.c.rank_search.desc())
+            .join(taddr, addr_join)
+    if is_duckdb:
+        # Read the address places from placex by row id (see duckdb_layout).
+        rids = placex_rowids()
+        sql = sql.join(rids, rids.c.place_id == taddr.c.address_place_id)
+        placex_join = sa.and_(taddr.c.address_place_id == t.c.place_id,
+                              placex_rowid() == rids.c.rid)
+    else:
+        placex_join = taddr.c.address_place_id == t.c.place_id
+    sql = sql.join(t, placex_join)\
+        .order_by('src_place_id')\
+        .order_by(sa.column('rank_address').desc())\
+        .order_by((taddr.c.place_id == ltab.c.value['pid'].as_integer()).desc())\
+        .order_by(sa.case((sa.func.CrosscheckNames(t.c.name, ltab.c.value['names']), 2),
+                          (taddr.c.isaddress, 0),
+                          (sa.and_(taddr.c.fromarea,
+                                   t.c.geometry.ST_Contains(
+                                       sa.func.ST_GeomFromEWKT(
+                                           ltab.c.value['c'].as_string()))), 1),
+                          else_=-1).desc())\
+        .order_by(taddr.c.fromarea.desc())\
+        .order_by(taddr.c.distance.desc())\
+        .order_by(t.c.rank_search.desc())
 
     current_result = None
     current_rank_address = -1

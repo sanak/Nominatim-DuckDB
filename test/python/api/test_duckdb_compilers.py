@@ -17,7 +17,10 @@ from nominatim_api.sql.sqlalchemy_schema import SearchTables
 from nominatim_api.sql.sqlalchemy_types import Geometry, IntArray
 from nominatim_api.sql.sqlalchemy_functions import CategoryMatch
 from nominatim_api.search import db_search_lookups as lookups
-from nominatim_api.search.db_search_fields import FieldRanking, RankedTokens
+from nominatim_api.search.db_search_fields import (FieldRanking, RankedTokens, FieldLookup,
+                                                   WeightedStrings, WeightedCategories)
+from nominatim_api.search.db_searches import PlaceSearch, NearSearch
+from nominatim_api.types import SearchDetails
 from nominatim_api.search.query_analyzer_factory import make_query_analyzer
 
 duckdb = pytest.importorskip('duckdb')
@@ -88,6 +91,23 @@ def test_column_dwithin_placex_centroid_uses_point_columns():
                    ' AND placex.centroid_y >= ST_YMin(g) - (0.5)'
                    ' AND placex.centroid_y <= ST_YMax(g) + (0.5)'
                    ' AND ST_DWithin(placex.centroid, g, 0.5))')
+
+
+def test_column_covered_by_uses_bbox_columns():
+    t = SearchTables(sa.MetaData()).placex
+    sql = _compile(t.c.centroid.ST_CoveredBy(sa.literal_column('g')))
+
+    assert sql == ('(placex.centroid_x >= ST_XMin(g) AND placex.centroid_x <= ST_XMax(g)'
+                   ' AND placex.centroid_y >= ST_YMin(g) AND placex.centroid_y <= ST_YMax(g)'
+                   ' AND ST_CoveredBy(placex.centroid, g))')
+
+
+def test_covered_by_without_bbox_columns():
+    t = SearchTables(sa.MetaData()).placex
+    sub = sa.select(t.c.centroid, t.c.geometry).subquery('sub')
+    sql = _compile(sub.c.centroid.ST_CoveredBy(sub.c.geometry))
+
+    assert sql == 'ST_CoveredBy(sub.centroid, sub.geometry)'
 
 
 @pytest.fixture
@@ -224,9 +244,11 @@ def test_place_node_areas_like_postgres(rank, diameter):
                                     20 - diameter, 20 + diameter))
 
 
-def _make_synthetic_db(dbfile, nside, step):
+def _make_synthetic_db(dbfile, nside, step, place_id='i'):
     """ Create a database in the layout of `nominatim convert` with
         a grid of nside x nside POIs in placex and all other tables empty.
+        The POI number i is at (130 + (i % nside) * step, 30 + (i // nside) * step)
+        and gets the place_id computed by the SQL expression `place_id`.
     """
     con = duckdb.connect(str(dbfile))
     con.load_extension('spatial')
@@ -237,9 +259,9 @@ def _make_synthetic_db(dbfile, nside, step):
         con.execute(f'CREATE TABLE src_{table.name} ({coldefs})')
     con.execute(f"""INSERT INTO src_placex
                      (place_id, importance, rank_address, rank_search, indexed_status,
-                      osm_type, osm_id, class, type, name, geometry, centroid)
-                    SELECT i, 0.0001, 30, 30, 0, 'N', i, 'amenity', 'cafe',
-                           '{{"name": "Cafe"}}', pt, pt
+                      osm_type, osm_id, class, type, name, geometry, centroid, categories)
+                    SELECT {place_id}, 0.0001, 30, 30, 0, 'N', i, 'amenity', 'cafe',
+                           '{{"name": "Cafe"}}', pt, pt, ['osm.amenity.cafe']
                       FROM (SELECT i, ST_Point(130 + (i % {nside}) * {step},
                                                30 + (i // {nside}) * {step}) AS pt
                               FROM range({nside * nside}) t(i))
@@ -254,6 +276,7 @@ def _make_synthetic_db(dbfile, nside, step):
                                            extra_columns=convert_duckdb.EXTRA_BBOX_COLUMNS
                                                                        .get(name, ()))
         con.execute(f'DROP TABLE src_{name}')
+    convert_duckdb.create_placex_rowids(con)
     con.execute('CHECKPOINT')
     con.close()
 
@@ -264,7 +287,7 @@ class _ScanProfiler:
         output of DuckDB.
     """
 
-    def __init__(self, api, profile, table):
+    def __init__(self, api, profile, table, statement_filter=''):
         self.scans = []
         self.nodes = []
         engine = api._async_api._engine.sync_engine
@@ -288,7 +311,7 @@ class _ScanProfiler:
 
         @sa.event.listens_for(engine, 'after_cursor_execute')
         def _collect_scans(conn, cursor, statement, *_):
-            if table in statement:
+            if table in statement and statement_filter in statement:
                 with open(profile, encoding='utf-8') as fd:
                     _find_scans(json.load(fd))
 
@@ -627,3 +650,162 @@ def test_search_name_lookup_reads_only_candidates(tmp_path):
         # Only the vectors that contain a candidate are read.
         assert 'rowid IN' in node['extra_info'].get('Dynamic Filters', '')
         assert node['operator_cardinality'] < 0.01 * nplaces
+
+
+###########################################################################
+# Places read by place_id
+
+GRID_SIDE = 1600
+# The place_ids of the grid are scattered over the spatially sorted placex
+# like on real data (2560021 is a prime).
+GRID_PRIME = 2560021
+
+
+def _grid_id(i):
+    return (i * 7919) % GRID_PRIME
+
+
+@pytest.fixture(scope='module')
+def grid_db(tmp_path_factory):
+    """ A grid of GRID_SIDE x GRID_SIDE cafes (step 0.01 degrees) in the
+        layout of `nominatim convert`, place_ids from `_grid_id()`. The
+        places 50 and 2000050 have ten address places each. About every
+        1000th place is in search_name, the word 7 in the names of the
+        places 1000 and 2001000.
+    """
+    nplaces = GRID_SIDE * GRID_SIDE
+    dbfile = tmp_path_factory.mktemp('grid') / 'grid.duckdb'
+    _make_synthetic_db(dbfile, GRID_SIDE, 0.01, place_id=f'(i * 7919) % {GRID_PRIME}')
+    con = duckdb.connect(str(dbfile))
+    con.load_extension('spatial')
+    con.execute('SET preserve_insertion_order = true')
+    con.execute('DROP TABLE place_addressline')
+    con.execute(f"""CREATE TABLE src AS
+                    SELECT ((p::BIGINT * 7919) % {GRID_PRIME})::BIGINT AS place_id,
+                           (((p::BIGINT + 1 + k * 250007) % {nplaces}) * 7919
+                            % {GRID_PRIME})::BIGINT AS address_place_id,
+                           0.0 AS distance, true AS fromarea, true AS isaddress
+                      FROM (VALUES (50), (2000050)) v(p), range(10) r(k)""")
+    convert_duckdb.create_sorted_table(con, 'place_addressline', 'src',
+                                       order=convert_duckdb.KEY_ORDER['place_addressline'])
+    con.execute('DROP TABLE src')
+    con.execute('DROP TABLE search_name')
+    con.execute(f"""CREATE TABLE src AS
+                    SELECT place_id, importance, rank_search AS search_rank,
+                           rank_address AS address_rank,
+                           [CASE WHEN place_id IN ({_grid_id(1000)}, {_grid_id(2001000)}) THEN 7
+                                 ELSE 100 + place_id END]::INTEGER[] AS name_vector,
+                           [99]::INTEGER[] AS nameaddress_vector,
+                           'jp' AS country_code, centroid
+                      FROM placex
+                     WHERE place_id % 1000 = 0
+                           OR place_id IN ({_grid_id(1000)}, {_grid_id(2001000)})""")
+    convert_duckdb.create_sorted_table(con, 'search_name', 'src',
+                                       geom_column=convert_duckdb.BBOX_TABLES['search_name'])
+    con.execute('DROP TABLE src')
+    con.execute('CREATE TABLE src AS ' + convert_duckdb.REVERSE_SEARCH_SQL)
+    convert_duckdb.create_sorted_table(con, 'reverse_search_name', 'src',
+                                       order=convert_duckdb.KEY_ORDER['reverse_search_name'])
+    con.execute('DROP TABLE src')
+    con.execute('CHECKPOINT')
+    con.close()
+
+    return dbfile, nplaces
+
+
+@pytest.fixture
+def grid_api(grid_db):
+    dbfile, _ = grid_db
+    api = napi.NominatimAPI(environ={'NOMINATIM_DATABASE_DSN': f'duckdb:dbname={dbfile}'})
+    api._loop.run_until_complete(api._async_api.setup_database())
+    yield api
+    api.close()
+
+
+def _run_search(api, search, details):
+    async def _run():
+        async with api._async_api.begin() as conn:
+            return await search(conn, details)
+    return api._loop.run_until_complete(_run())
+
+
+# Number of rows in a DuckDB vector.
+VECTOR_SIZE = 2048
+
+
+def _assert_few_placex_rows(profiler, nrows, nplaces):
+    """ Every scan of placex must either skip most row groups or select
+        the rows of the `nplaces` places by row id, which reads at most
+        one vector per place. (A filter on place_id is only used to skip
+        row groups and, depending on the data, whole row groups are read.)
+    """
+    print('placex scans (rows scanned, rows emitted, dynamic filters):',
+          [(n['operator_rows_scanned'], n['operator_cardinality'],
+            str(n['extra_info'].get('Dynamic Filters', ''))[:80]) for n in profiler.nodes])
+    assert profiler.nodes
+    for node in profiler.nodes:
+        if node['operator_rows_scanned'] >= 0.2 * nrows:
+            assert 'rowid' in str(node['extra_info'].get('Dynamic Filters', ''))
+            assert node['operator_cardinality'] <= nplaces * VECTOR_SIZE
+
+
+def test_place_search_reads_placex_by_rowid(grid_db, grid_api, tmp_path):
+    """ The places found in search_name must be read from placex through
+        their row ids, not by scanning the row groups their place_ids
+        fall into.
+    """
+    class _Data:
+        penalty = 0.0
+        postcodes = WeightedStrings([], [])
+        countries = WeightedStrings([], [])
+        qualifiers = WeightedCategories([], [])
+        lookups = [FieldLookup('name_vector', [7], lookups.LookupAll)]
+        rankings = []
+        housenumbers = None
+
+    profiler = _ScanProfiler(grid_api, tmp_path / 'profile.json', 'placex', 'searches')
+    results = _run_search(grid_api, PlaceSearch(0.0, _Data(), 2, False).lookup,
+                          SearchDetails())
+
+    assert sorted(r.place_id for r in results) == sorted([_grid_id(1000), _grid_id(2001000)])
+    _assert_few_placex_rows(profiler, grid_db[1], 2)
+
+
+def test_address_details_read_placex_by_rowid(grid_db, grid_api, tmp_path):
+    """ The address places of a result must be read from placex through
+        their row ids.
+    """
+    nplaces = grid_db[1]
+    profiler = _ScanProfiler(grid_api, tmp_path / 'profile.json', 'placex',
+                             'place_addressline')
+    results = grid_api.lookup([napi.PlaceID(_grid_id(50)), napi.PlaceID(_grid_id(2000050))],
+                              address_details=True)
+
+    assert [r.place_id for r in results] == [_grid_id(50), _grid_id(2000050)]
+    for res, i in zip(results, (50, 2000050)):
+        assert sorted(a.place_id for a in res.address_rows if a.place_id != res.place_id) \
+            == sorted(_grid_id((i + 1 + k * 250007) % nplaces) for k in range(10))
+    _assert_few_placex_rows(profiler, nplaces, 20)
+
+
+def test_near_search_reads_only_places_near_the_anchor(grid_db, grid_api, tmp_path):
+    """ A category search around a place must only read the places
+        of the category in the search area of the place and then
+        the full rows of the results.
+    """
+    anchor = 800 * GRID_SIDE + 800
+    search = NearSearch(0.1, WeightedCategories([('amenity', 'cafe')], [0.0]), None)
+    profiler = _ScanProfiler(grid_api, tmp_path / 'profile.json', 'placex')
+
+    async def _lookup(conn, details):
+        results = napi.SearchResults()
+        await search.lookup_category(results, conn, [_grid_id(anchor)], ('amenity', 'cafe'),
+                                     0.0, details)
+        return results
+
+    results = _run_search(grid_api, _lookup, SearchDetails(max_results=5))
+
+    assert results[0].place_id == _grid_id(anchor)
+    assert {r.place_id for r in results[1:]} == {_grid_id(anchor + d) for d in
+                                                 (-1, 1, -GRID_SIDE, GRID_SIDE)}
+    _assert_few_placex_rows(profiler, grid_db[1], 5)

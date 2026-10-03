@@ -7,14 +7,15 @@
 """
 Implementation of a category search around a place.
 """
-from typing import List, Tuple
+from typing import Any, List, Tuple
 
 import sqlalchemy as sa
 
 from . import base
-from ...typing import SaBind
+from ...typing import SaBind, SaFromClause
 from ...types import SearchDetails, Bbox
 from ...connection import SearchConnection
+from ...sql.duckdb_layout import placex_rowids, placex_rowid
 from ... import results as nres
 from ..db_search_fields import WeightedCategories
 
@@ -79,8 +80,19 @@ class NearSearch(base.AbstractSearch):
         """ Find places of the given category near the list of
             place ids and add the results to 'results'.
         """
-        tgeom = conn.t.placex.alias('pgeom')
         table = conn.t.placex
+        is_duckdb = conn.connection.dialect.name == 'duckdb'
+        tgeom: SaFromClause
+        if is_duckdb:
+            # Read the base places from placex by row id (see duckdb_layout).
+            rids = placex_rowids()
+            tgeom = sa.select(table.c.place_id, table.c.rank_address,
+                              table.c.geometry, table.c.centroid)\
+                      .join_from(table, rids, placex_rowid() == rids.c.rid)\
+                      .where(rids.c.place_id.in_(ids))\
+                      .subquery('pgeom')
+        else:
+            tgeom = conn.t.placex.alias('pgeom')
 
         # Look up places of the category near the base place. The centroid
         # containment is served by the combined centroid/categories index.
@@ -89,28 +101,46 @@ class NearSearch(base.AbstractSearch):
                                        tgeom.c.geometry.is_area()),
                                tgeom.c.geometry),
                               else_=tgeom.c.centroid.ST_Expand(0.05))
-        sql = sa.select(table.c.place_id,
-                        sa.func.min(tgeom.c.centroid.ST_Distance(table.c.centroid))
-                          .label('dist'))\
+        dist = sa.func.min(tgeom.c.centroid.ST_Distance(table.c.centroid)).label('dist')
+        sql = sa.select(table.c.place_id, dist)\
                 .join(tgeom, table.c.centroid.ST_CoveredBy(search_area))\
                 .where(base.category_filter(table, *category))
 
-        inner = sql.where(tgeom.c.place_id.in_(ids))\
-                   .group_by(table.c.place_id).subquery()
+        sql = sql.where(tgeom.c.place_id.in_(ids))
 
         t = conn.t.placex
-        sql = base.select_placex(t).add_columns((-inner.c.dist).label('importance'))\
-                                   .join(inner, inner.c.place_id == t.c.place_id)\
-                                   .order_by(inner.c.dist)
-
-        sql = sql.where(base.no_index(t.c.rank_address).between(MIN_RANK_PARAM, MAX_RANK_PARAM))
-        sql = base.filter_by_category(sql, t, details)
+        filters: List[Any] = \
+            [base.no_index(t.c.rank_address).between(MIN_RANK_PARAM, MAX_RANK_PARAM)]
+        restriction = base.category_restriction(t, details)
+        if restriction is not None:
+            filters.append(restriction)
         if details.countries:
-            sql = sql.where(t.c.country_code.in_(COUNTRIES_PARAM))
+            filters.append(t.c.country_code.in_(COUNTRIES_PARAM))
         if details.excluded:
-            sql = sql.where(base.exclude_places(t))
+            filters.append(base.exclude_places(t))
         if details.layers is not None:
-            sql = sql.where(base.filter_by_layer(t, details.layers))
+            filters.append(base.filter_by_layer(t, details.layers))
+
+        if is_duckdb:
+            # The filters apply to the same row of placex inside and outside
+            # (place_id is unique). Filter and limit the places inside, so
+            # that only the full rows of the results are read, by row id.
+            for where in filters:
+                sql = sql.where(where)
+            inner = sql.add_columns(placex_rowid().label('rid'))\
+                       .group_by(table.c.place_id, placex_rowid())\
+                       .order_by(dist).limit(LIMIT_PARAM).subquery()
+            sql = base.select_placex(t).add_columns((-inner.c.dist).label('importance'))\
+                      .join_from(t, inner, sa.and_(inner.c.place_id == t.c.place_id,
+                                                   inner.c.rid == placex_rowid()))\
+                      .order_by(inner.c.dist)
+        else:
+            inner = sql.group_by(table.c.place_id).subquery()
+            sql = base.select_placex(t).add_columns((-inner.c.dist).label('importance'))\
+                                       .join(inner, inner.c.place_id == t.c.place_id)\
+                                       .order_by(inner.c.dist)
+            for where in filters:
+                sql = sql.where(where)
 
         sql = sql.limit(LIMIT_PARAM)
 

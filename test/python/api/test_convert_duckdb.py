@@ -57,7 +57,7 @@ def converted(apiobj, tmp_path):
     apiobj.add_osmline(place_id=600, geometry='LINESTRING(131 31, 131.01 31.01)')
     apiobj.add_postcode(place_id=700, postcode='100-0001', country_code='jp')
     apiobj.add_country('jp', 'POLYGON((122 20, 154 20, 154 46, 122 46, 122 20))')
-    for pid, words in ((1, [30, 10]), (2, [20, 10]), (3, [40]), (4, [5, 30])):
+    for pid, words in ((1, [30, 10]), (2, [20, 10]), (3, [40]), (4, [5, 30]), (5, [7, 7])):
         apiobj.add_search_name(pid, names=words, address=[99, words[0]],
                                centroid=(130.0 + pid, 30.0))
 
@@ -91,7 +91,7 @@ def test_convert_creates_no_indexes(converted):
 def test_convert_copies_tables(converted):
     _, con = converted
     tables = {r[0] for r in con.execute('SELECT table_name FROM duckdb_tables()').fetchall()}
-    assert {'placex', 'placex_place_node_areas', 'search_name', 'word',
+    assert {'placex', 'placex_place_node_areas', 'placex_rowids', 'search_name', 'word',
             'reverse_search_name', 'location_property_osmline'} <= tables
     assert con.execute('SELECT count(*) FROM placex').fetchone()[0] == 101
     assert con.execute('SELECT count(*) FROM placex_place_node_areas').fetchone()[0] == 100
@@ -122,12 +122,26 @@ def test_convert_bbox_columns(converted, table, geom):
     assert bad == 0
 
 
-def test_convert_reverse_search_name_sorted_by_word(converted):
+def test_convert_reverse_search_name_one_row_per_word_and_place(converted):
     _, con = converted
-    rows = con.execute('SELECT word, "column", places FROM reverse_search_name'
+    rows = con.execute('SELECT "column", word, place_id FROM reverse_search_name'
                        ' ORDER BY rowid').fetchall()
-    assert [r[0] for r in rows] == sorted(r[0] for r in rows)
-    assert ('10', 'name_vector', [1, 2]) in [(str(r[0]), r[1], r[2]) for r in rows]
+    vectors = con.execute('SELECT place_id, name_vector, nameaddress_vector'
+                          ' FROM search_name').fetchall()
+    expected = {(col, word, pid) for pid, names, address in vectors
+                for col, words in (('name_vector', names), ('nameaddress_vector', address))
+                for word in words}
+
+    assert rows == sorted(expected)
+    assert ('name_vector', 10, 1) in rows
+    assert rows.count(('name_vector', 7, 5)) == 1
+
+
+def test_convert_placex_rowids(converted):
+    _, con = converted
+    rows = con.execute('SELECT place_id, rid FROM placex_rowids ORDER BY rowid').fetchall()
+
+    assert rows == sorted(con.execute('SELECT place_id, rowid FROM placex').fetchall())
 
 
 def test_spatial_sort_prunes_row_groups(tmp_path):

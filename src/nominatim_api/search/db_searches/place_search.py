@@ -12,9 +12,10 @@ from typing import cast
 import sqlalchemy as sa
 
 from . import base
-from ...typing import SaBind, SaExpression, SaColumn
+from ...typing import SaBind, SaExpression, SaColumn, SaFromClause
 from ...types import SearchDetails, Bbox
 from ...sql.sqlalchemy_types import Geometry
+from ...sql.duckdb_layout import placex_rowids, placex_rowid
 from ...connection import SearchConnection
 from ... import results as nres
 from ..db_search_fields import SearchData
@@ -137,9 +138,19 @@ class PlaceSearch(base.AbstractSearch):
         """ Find results for the search in the database.
         """
         t = conn.t.placex
-        tsearch = self._inner_search_name_cte(conn, details)
+        tsearch: SaFromClause = self._inner_search_name_cte(conn, details)
 
-        sql = base.select_placex(t).join(tsearch, t.c.place_id == tsearch.c.place_id)
+        if conn.connection.dialect.name == 'duckdb':
+            # Read the places from placex by row id (see duckdb_layout).
+            rids = placex_rowids()
+            tsearch = sa.select(tsearch.c.place_id, tsearch.c.penalty, rids.c.rid)\
+                        .join_from(tsearch, rids, rids.c.place_id == tsearch.c.place_id)\
+                        .subquery()
+            sql = base.select_placex(t)\
+                      .join_from(t, tsearch, sa.and_(t.c.place_id == tsearch.c.place_id,
+                                                     placex_rowid() == tsearch.c.rid))
+        else:
+            sql = base.select_placex(t).join(tsearch, t.c.place_id == tsearch.c.place_id)
 
         if details.geometry_output:
             sql = base.add_geometry_columns(sql, t.c.geometry, details)

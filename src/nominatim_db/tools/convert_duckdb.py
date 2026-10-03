@@ -26,7 +26,15 @@ on DuckDB skipping row groups through their min/max statistics instead:
     then orders by the Hilbert value of the bbox centre, using the extent
     of the table as bounds.
   * Tables accessed by key are sorted by that key (`word` by word_token,
-    `reverse_search_name` by word, `place_addressline` by place_id).
+    `reverse_search_name` by column and word, `place_addressline` by
+    place_id).
+  * `reverse_search_name` has one row per word and place (in long format,
+    not a list of places per word): DuckDB decodes the lists of a whole
+    vector of rows to read one of them, and the vectors of the frequent
+    words hold hundreds of millions of place ids on a country.
+  * `placex_rowids` maps each place_id to the row id of the place in
+    placex and is sorted by place_id. The frontend reads places by row id
+    through it, see `nominatim_api.sql.duckdb_layout`.
   * The search relies on place_id being unique in `search_name` (as the
     unique index in PostgreSQL guarantees), which is checked after copying.
 
@@ -52,8 +60,8 @@ import sqlalchemy as sa
 import nominatim_api as napi
 from nominatim_api.search.query_analyzer_factory import make_query_analyzer
 from nominatim_api.sql.duckdb_layout import (BBOX_TABLES, EXTRA_BBOX_COLUMNS,
-                                             POINT_COLUMNS, bbox_columns,
-                                             reverse_place_diameter_sql)
+                                             POINT_COLUMNS, PLACEX_ROWID_TABLE,
+                                             bbox_columns, reverse_place_diameter_sql)
 from nominatim_api.sql.sqlalchemy_types import (Geometry, IntArray, KeyValueStore,
                                                 CategoryArray, Json)
 
@@ -66,7 +74,7 @@ KEY_ORDER = {
     'place_addressline': 'place_id',
     'placex_entrance': 'place_id',
     'word': 'word_token',
-    'reverse_search_name': 'word, "column"',
+    'reverse_search_name': '"column", word, place_id',
 }
 
 # Size tiers (largest bbox side in degrees) for the spatial sort order.
@@ -86,14 +94,13 @@ NODE_AREAS_SQL = f"""
      WHERE rank_address BETWEEN 5 AND 25
            AND osm_type = 'N' AND linked_place_id IS NULL"""
 
+# One row per word and place. The vectors may contain a word twice.
 REVERSE_SEARCH_SQL = """
-    SELECT word, col AS "column", list_sort(list(place_id)) AS places
-      FROM (SELECT unnest(name_vector) AS word, 'name_vector' AS col, place_id
-              FROM search_name
-            UNION ALL
-            SELECT unnest(nameaddress_vector), 'nameaddress_vector', place_id
-              FROM search_name)
-     GROUP BY word, col"""
+    SELECT 'name_vector' AS "column", unnest(list_distinct(name_vector)) AS word, place_id
+      FROM search_name
+    UNION ALL
+    SELECT 'nameaddress_vector', unnest(list_distinct(nameaddress_vector)), place_id
+      FROM search_name"""
 
 
 async def convert(project_dir: Optional[Union[str, Path]],
@@ -384,6 +391,17 @@ class DuckDBWriter:
         self.dest.execute(f'DROP TABLE stage."{name}"')
         if name == 'search_name':
             check_unique_place_ids(self.dest)
+        elif name == 'placex':
+            create_placex_rowids(self.dest)
+
+
+def create_placex_rowids(con: 'duckdb.DuckDBPyConnection') -> None:
+    """ Create the table that maps the place_ids of the final placex table
+        to the row ids of the places, sorted by place_id. placex must
+        not be changed afterwards.
+    """
+    con.execute(f'CREATE TABLE {PLACEX_ROWID_TABLE} AS'
+                ' SELECT place_id, rowid AS rid FROM placex ORDER BY place_id')
 
 
 def check_unique_place_ids(con: 'duckdb.DuckDBPyConnection') -> None:

@@ -15,9 +15,10 @@ A DuckDB database has no indexes. Spatial filters on table
 columns are instead done on the bbox helper columns described in
 `duckdb_layout`, which allow DuckDB to skip row groups through their
 min/max statistics. Lookups of search terms go through the table
-`reverse_search_name`, which is sorted by word, so that only the row
-groups containing the words are read. The candidate rows of `search_name`
-are then selected by their row id (see `_word_lookup_sql()`).
+`reverse_search_name`, which has one row per word and place and is sorted
+by column and word, so that only the rows of the words are read. The
+candidate rows of `search_name` are then selected by their row id (see
+`_word_lookup_sql()`).
 
 Output of geometries in KML format is not supported because DuckDB
 has no function for it. Requesting it raises a UsageError.
@@ -143,11 +144,9 @@ def _duckdb_dwithin_column(element: Geometry_ColumnDWithin,
     return f"({_bbox_overlap_sql(bbox, geomsql, distsql)} AND {exact})"
 
 
-def _register_function(name: str, rettype: Any, template: str, nargs: int = 99) -> None:
-    """ Compile the given function on DuckDB using the template, where
-        '{0}', '{1}' etc. are replaced with the arguments. Arguments
-        after the first `nargs` ones are dropped. Functions without a
-        SQLite alias get a function class of their own, which compiles
+def _function_class(name: str, rettype: Any) -> Any:
+    """ Return the function class for `sa.func.<name>`. Functions without
+        a SQLite alias get a function class of their own, which compiles
         to the plain function call on all other dialects.
     """
     func_class = FUNCTION_ALIAS_CLASSES.get(name)
@@ -157,6 +156,15 @@ def _register_function(name: str, rettype: Any, template: str, nargs: int = 99) 
             "name": name,
             "identifier": name,
             "inherit_cache": True})
+    return func_class
+
+
+def _register_function(name: str, rettype: Any, template: str, nargs: int = 99) -> None:
+    """ Compile the given function on DuckDB using the template, where
+        '{0}', '{1}' etc. are replaced with the arguments. Arguments
+        after the first `nargs` ones are dropped.
+    """
+    func_class = _function_class(name, rettype)
 
     def _duckdb_impl(element: Any, compiler: Any, **kw: Any) -> str:
         # Dropped arguments must not be processed, or their bind
@@ -191,6 +199,25 @@ _register_function('ST_GeomFromText', Geometry, "ST_GeomFromText({0})", nargs=1)
 # ST_Collect is a scalar function on a list of geometries in DuckDB.
 _register_function('ST_Collect', Geometry, "ST_Collect(list({0}))")
 compiles(FUNCTION_ALIAS_CLASSES['ST_AsKML'], DIALECT)(_duckdb_unsupported)
+
+
+@compiles(_function_class('ST_CoveredBy', sa.Boolean), DIALECT)
+def _duckdb_covered_by(element: Any, compiler: 'sa.Compiled', **kw: Any) -> str:
+    # The bbox of a geometry covered by another one is inside the bbox
+    # of the other one. With bbox columns, these conditions skip row
+    # groups, also in joins: DuckDB pushes the min/max of the other side
+    # into the table scan.
+    geom1, geom2 = list(element.clauses)
+    sql1, sql2 = (compiler.process(c, **kw) for c in (geom1, geom2))
+    exact = f"ST_CoveredBy({sql1}, {sql2})"
+    bbox = _bbox_column_sql(geom1, compiler, **kw)
+    if bbox is None:
+        return exact
+
+    minx, miny, maxx, maxy = bbox
+    return (f"({minx} >= ST_XMin({sql2}) AND {maxx} <= ST_XMax({sql2})"
+            f" AND {miny} >= ST_YMin({sql2}) AND {maxy} <= ST_YMax({sql2})"
+            f" AND {exact})")
 
 
 @compiles(FUNCTION_ALIAS_CLASSES['ST_AsSVG'], DIALECT)
@@ -330,15 +357,15 @@ _register_function(
     + ")[1], '$[0]') AS DOUBLE), {2})")
 
 
-def _word_lookup_sql(element: Any, compiler: 'sa.Compiled', select: str,
-                     having: str = '', **kw: Any) -> str:
-    """ SQL for finding the rows of search_name with the place ids
-        selected through `select` from the rows of reverse_search_name
-        that contain the tokens of the lookup.
+def _word_lookup_sql(element: Any, compiler: 'sa.Compiled', group: str = '',
+                     **kw: Any) -> str:
+    """ SQL for finding the rows of search_name with the place ids of
+        the rows of reverse_search_name that contain the tokens of the
+        lookup, optionally grouped by place_id through `group`.
 
         The words are compared with IN against a subquery, which DuckDB
         turns into a filter on the table scan that skips all row groups
-        without the words (the table is sorted by word).
+        without the words (the table is sorted by column and word).
 
         The rows of search_name are then selected by their row id: the
         place ids of the candidates are first looked up in the place_id
@@ -361,9 +388,9 @@ def _word_lookup_sql(element: Any, compiler: 'sa.Compiled', select: str,
     if isinstance(table, sa.sql.expression.Alias):
         table = table.element
     assert isinstance(table, sa.Table)
-    words = (f'SELECT {select} FROM reverse_search_name'
+    words = (f'SELECT place_id FROM reverse_search_name'
              f' WHERE word IN (SELECT unnest({compiler.process(tokens, **kw)}))'
-             f' AND "column" = {compiler.process(colname, **kw)}{having}')
+             f' AND "column" = {compiler.process(colname, **kw)}{group}')
     return (f"({placesql[:placesql.rfind('.') + 1]}rowid IN"
             f" (SELECT rowid FROM {table.name} WHERE place_id IN ({words})))")
 
@@ -371,21 +398,20 @@ def _word_lookup_sql(element: Any, compiler: 'sa.Compiled', select: str,
 @compiles(LookupAll, DIALECT)
 def _duckdb_lookup_all(element: LookupAll, compiler: 'sa.Compiled', **kw: Any) -> str:
     tokens = list(element.clauses)[3]
-    # Intersect the place lists of all words, smallest first. When a word
-    # is not in the table at all, then there is no place with all words.
-    # The search vector itself is not checked: place_id must be unique
-    # in search_name (see _word_lookup_sql()).
+    # The places that have a row for every word. (column, word, place_id)
+    # is unique in reverse_search_name. The search vector itself is not
+    # checked: place_id must be unique in search_name (see _word_lookup_sql()).
     return _word_lookup_sql(element, compiler,
-                            "unnest(list_reduce(list(places ORDER BY len(places)),"
-                            " lambda a, b: list_intersect(a, b)))",
-                            having=" HAVING count(*) = len(list_distinct("
-                                   f"{compiler.process(tokens, **kw)}))", **kw)
+                            " GROUP BY place_id HAVING count(*) = len(list_distinct("
+                            f"{compiler.process(tokens, **kw)}))", **kw)
 
 
 @compiles(LookupAny, DIALECT)
 def _duckdb_lookup_any(element: LookupAny, compiler: 'sa.Compiled', **kw: Any) -> str:
-    # The union of the place lists: the IN removes duplicates.
-    return _word_lookup_sql(element, compiler, "unnest(places)", **kw)
+    # The places of any of the words. The IN would remove duplicates, but
+    # without the grouping, DuckDB overestimates the rows of the words and
+    # builds the hash table of the join on all place_ids of search_name.
+    return _word_lookup_sql(element, compiler, " GROUP BY place_id", **kw)
 
 
 @compiles(Restrict, DIALECT)
