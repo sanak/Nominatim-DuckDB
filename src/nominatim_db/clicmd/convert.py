@@ -53,7 +53,7 @@ class ConvertDB:
     """ Convert an existing database into a different format. (EXPERIMENTAL)
 
         Dump a read-only version of the database in a different format.
-        Supported are SQLite and DuckDB databases.
+        Supported are SQLite and DuckDB databases and Parquet files.
     """
 
     def __init__(self) -> None:
@@ -61,10 +61,14 @@ class ConvertDB:
 
     def add_args(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument('--format', default='sqlite',
-                            choices=('sqlite', 'duckdb'),
+                            choices=('sqlite', 'duckdb', 'parquet'),
                             help='Format of the output database (default: sqlite)')
         parser.add_argument('--output', '-o', required=True, type=Path,
-                            help='File to write the database to.')
+                            help='File to write the database to'
+                                 ' (an empty or new directory for parquet).')
+        parser.add_argument('--keep-duckdb', action='store_true',
+                            help='parquet only: keep the intermediate DuckDB database'
+                                 ' in the output directory')
         group = parser.add_argument_group('Switches to define database layout'
                                           '(currently no effect)')
         group.add_argument('--reverse', action=WithAction, dest_set=self.options, default=True,
@@ -76,6 +80,15 @@ class ConvertDB:
                            help='Enable/disable support for details API (default: enabled)')
 
     def run(self, args: NominatimArgs) -> int:
+        if args.format == 'parquet':
+            if args.output.exists() and (not args.output.is_dir()
+                                         or any(args.output.iterdir())):
+                raise UsageError(f"Output directory '{args.output}' exists and is not empty.")
+            from ..tools import convert_parquet
+            asyncio_run(convert_parquet.convert(args.project_dir, args.output, self.options,
+                                                keep_duckdb=args.keep_duckdb))
+            return 0
+
         if args.output.exists():
             raise UsageError(f"File '{args.output}' already exists. Refusing to overwrite.")
 

@@ -136,3 +136,123 @@ def test_import_pyarrow_too_old(monkeypatch):
     monkeypatch.setattr(pyarrow, '__version__', '23.0.0')
     with pytest.raises(UsageError, match='pyarrow>=24'):
         convert_parquet.import_pyarrow()
+
+
+from nominatim_api.search.query_analyzer_factory import make_query_analyzer  # noqa: E402
+from nominatim_api.sql.duckdb_layout import (PARQUET_TABLES_PROPERTY,  # noqa: E402
+                                             STORAGE_FORMAT_PROPERTY)
+
+
+def test_verify_table_detects_missing_rows(con, tmp_path):
+    out = tmp_path / 'placex.parquet'
+    convert_parquet.export_table(con, 'placex', 'SELECT * FROM placex WHERE place_id > 0',
+                                 out, None)
+    with pytest.raises(UsageError, match='rows'):
+        convert_parquet.verify_table(con, 'placex', 'SELECT * FROM placex', out)
+
+
+def test_verify_table_detects_type_change(con, tmp_path):
+    out = tmp_path / 'placex.parquet'
+    con.execute(f"COPY (SELECT * REPLACE (name::VARCHAR AS name) FROM placex) TO '{out}'")
+    with pytest.raises(UsageError, match='name'):
+        convert_parquet.verify_table(con, 'placex', 'SELECT * FROM placex', out)
+
+
+def test_verify_rowids_detects_reordering(con, tmp_path):
+    con.execute('CREATE TABLE placex_rowids AS'
+                ' SELECT place_id, rowid AS rid FROM placex ORDER BY place_id')
+    out = tmp_path / 'placex.parquet'
+    convert_parquet.export_table(con, 'placex', 'SELECT * FROM placex ORDER BY place_id DESC',
+                                 out, None)
+    with pytest.raises(UsageError, match='row order'):
+        convert_parquet.verify_rowids(con, out)
+
+
+@pytest.fixture
+def source_db(apiobj):
+    apiobj.add_data(
+        'properties',
+        [{'property': 'tokenizer', 'value': 'icu'},
+         {'property': 'tokenizer_import_normalisation', 'value': ':: lower();'},
+         {'property': 'tokenizer_import_transliteration', 'value': "'1' > '/1/';"}])
+    for i in range(20):
+        apiobj.add_placex(place_id=1 + i, osm_type='N', osm_id=i, rank_search=30,
+                          name={'name': f'p{i}'}, centroid=(130.0 + i * 0.1, 30.0))
+    apiobj.add_search_name(1, names=[10], address=[99], centroid=(130.0, 30.0))
+
+    async def _word():
+        async with apiobj.api._async_api.begin() as conn:
+            await make_query_analyzer(conn)
+            await conn.connection.run_sync(conn.t.meta.tables['word'].create)
+    apiobj.async_to_sync(_word())
+    return apiobj
+
+
+def test_convert_writes_parquet_directory(source_db, tmp_path):
+    outdir = tmp_path / 'pq'
+    source_db.async_to_sync(convert_parquet.convert(None, outdir, {'reverse', 'search'}))
+
+    names = sorted(p.name for p in outdir.iterdir())
+    assert 'placex.parquet' in names and 'nominatim_properties.parquet' in names
+    assert all(n.endswith('.parquet') for n in names)  # no leftovers
+
+    props = dict(duckdb.connect().execute(
+        f"SELECT property, value FROM '{outdir / 'nominatim_properties.parquet'}'").fetchall())
+    assert props[STORAGE_FORMAT_PROPERTY] == 'parquet'
+    assert set(props[PARQUET_TABLES_PROPERTY].split(',')) == {n[:-8] for n in names}
+
+
+def test_convert_uses_table_settings(source_db, tmp_path, monkeypatch):
+    monkeypatch.setitem(convert_parquet.PARQUET_TABLE_MAX_ROWS, 'placex', 7)
+    outdir = tmp_path / 'pq'
+    source_db.async_to_sync(convert_parquet.convert(None, outdir, {'reverse'}))
+
+    reader = duckdb.connect()
+    placex = outdir / 'placex.parquet'
+    assert [r[0] for r in reader.execute(
+        f"""SELECT max(row_group_num_rows) FROM parquet_metadata('{placex}')
+             GROUP BY row_group_id ORDER BY row_group_id""").fetchall()] == [7, 7, 6]
+    assert {r[0] for r in reader.execute(
+        f"""SELECT DISTINCT path_in_schema FROM parquet_metadata('{placex}')
+             WHERE bloom_filter_offset IS NOT NULL""").fetchall()} == {'osm_id', 'place_id'}
+
+
+def test_convert_without_search_has_no_search_tables(source_db, tmp_path):
+    outdir = tmp_path / 'pq'
+    source_db.async_to_sync(convert_parquet.convert(None, outdir, {'reverse'}))
+
+    assert not (outdir / 'search_name.parquet').exists()
+    assert not (outdir / 'word.parquet').exists()
+
+
+def test_convert_keep_duckdb(source_db, tmp_path):
+    outdir = tmp_path / 'pq'
+    source_db.async_to_sync(convert_parquet.convert(None, outdir, {'reverse'},
+                                                    keep_duckdb=True))
+
+    dbfile = outdir / convert_parquet.DUCKDB_NAME
+    with duckdb.connect(str(dbfile), read_only=True) as kept:
+        # the database file itself stays a plain DuckDB database
+        assert kept.execute('SELECT count(*) FROM nominatim_properties WHERE property = ?',
+                            (STORAGE_FORMAT_PROPERTY, )).fetchone()[0] == 0
+
+
+def test_convert_refuses_non_empty_directory(source_db, tmp_path):
+    outdir = tmp_path / 'pq'
+    outdir.mkdir()
+    (outdir / 'other.txt').write_text('keep me')
+
+    with pytest.raises(UsageError, match='not empty'):
+        source_db.async_to_sync(convert_parquet.convert(None, outdir, {'reverse'}))
+    assert (outdir / 'other.txt').read_text() == 'keep me'
+
+
+def test_convert_removes_partial_output_on_error(source_db, tmp_path, monkeypatch):
+    def _fail(*args, **kwargs):
+        raise UsageError('verification failed')
+    monkeypatch.setattr(convert_parquet, 'verify_rowids', _fail)
+    outdir = tmp_path / 'pq'
+
+    with pytest.raises(UsageError, match='verification failed'):
+        source_db.async_to_sync(convert_parquet.convert(None, outdir, {'reverse'}))
+    assert not outdir.exists() or not any(outdir.iterdir())

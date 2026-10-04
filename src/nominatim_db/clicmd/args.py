@@ -104,6 +104,7 @@ class NominatimArgs:
 
     # Arguments to 'convert'
     output: Path
+    keep_duckdb: bool
 
     # Arguments to 'refresh'
     postcodes: bool
