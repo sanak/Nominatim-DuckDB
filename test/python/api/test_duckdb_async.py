@@ -85,3 +85,23 @@ async def test_cancelled_offloaded_query_is_interrupted():
         assert time.monotonic() - start < 2
     finally:
         await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_offloaded_call_waits_when_interrupt_fails():
+    finished = []
+
+    class _Cursor:
+        def execute(self, *_):
+            time.sleep(0.3)
+            finished.append(True)
+
+    def _interrupt():
+        raise RuntimeError('connection already closed')
+
+    cursor = _AsyncDuckDBCursor(_Cursor(), offload=True, interrupt=_interrupt)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(cursor.execute('SELECT 1'), 0.05)
+    # The cancellation is passed on only after the worker has returned.
+    assert finished == [True]

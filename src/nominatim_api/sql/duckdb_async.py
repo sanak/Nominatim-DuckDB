@@ -60,8 +60,12 @@ async def _run(offload: bool, interrupt: Optional[Callable[[], None]],
     except asyncio.CancelledError:
         while not future.done():
             if interrupt is not None:
-                # Repeated, in case the query had not started yet.
-                interrupt()
+                # Repeated, in case the query had not started yet. An error
+                # must not end the wait for the worker thread.
+                try:
+                    interrupt()
+                except Exception:
+                    pass
             try:
                 await asyncio.wait((future, ), timeout=0.1)
             except asyncio.CancelledError:
