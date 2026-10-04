@@ -85,11 +85,16 @@ class NearSearch(base.AbstractSearch):
         tgeom: SaFromClause
         if is_duckdb:
             # Read the base places from placex by row id (see duckdb_layout).
+            # Join on place_id and row id: on Parquet views, a join on the
+            # row id alone makes DuckDB build the hash table on placex.
             rids = placex_rowids()
+            baserids = sa.select(rids.c.place_id, rids.c.rid)\
+                         .where(rids.c.place_id.in_(ids)).subquery('baserids')
             tgeom = sa.select(table.c.place_id, table.c.rank_address,
                               table.c.geometry, table.c.centroid)\
-                      .join_from(table, rids, placex_rowid() == rids.c.rid)\
-                      .where(rids.c.place_id.in_(ids))\
+                      .join_from(table, baserids,
+                                 sa.and_(table.c.place_id == baserids.c.place_id,
+                                         placex_rowid() == baserids.c.rid))\
                       .subquery('pgeom')
         else:
             tgeom = conn.t.placex.alias('pgeom')

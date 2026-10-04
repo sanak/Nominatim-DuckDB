@@ -845,3 +845,24 @@ def test_address_details_select_address_lines_first(grid_db, grid_api):
     assert sql.startswith('WITH addresslines AS MATERIALIZED (SELECT')
     assert sql.count('FROM place_addressline') == 1
     assert 'JOIN addresslines ON addresslines.place_id = ' in sql
+
+
+def test_near_search_joins_base_places_on_place_id_and_rowid(grid_db, grid_api):
+    """ The base places of a near search are read from placex with a
+        join on both place_id and row id. On Parquet views, a join on
+        the row id alone makes DuckDB build the hash table on placex.
+    """
+    search = NearSearch(0.1, WeightedCategories([('amenity', 'cafe')], [0.0]), None)
+    log = _StatementLog(grid_api, 'placex_rowids')
+
+    async def _lookup(conn, details):
+        results = napi.SearchResults()
+        await search.lookup_category(results, conn, [_grid_id(1000)], ('amenity', 'cafe'),
+                                     0.0, details)
+        return results
+
+    assert _run_search(grid_api, _lookup, SearchDetails(max_results=5))
+    assert len(log.statements) == 1
+    assert 'WHERE placex_rowids.place_id IN (' in log.statements[0]
+    assert 'ON placex.place_id = baserids.place_id AND placex.rowid = baserids.rid' \
+        in log.statements[0]
