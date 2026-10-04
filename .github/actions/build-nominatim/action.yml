@@ -40,5 +40,5 @@ runs:
           if: inputs.dependencies == 'apt'
 
         - name: Build nominatim
-          run: ./venv/bin/pip install 'Nominatim/packaging/nominatim-api[duckdb]' Nominatim/packaging/nominatim-db
+          run: ./venv/bin/pip install 'Nominatim/packaging/nominatim-api[duckdb]' Nominatim/packaging/nominatim-db 'pyarrow>=24; python_version >= "3.10"'
           shell: bash

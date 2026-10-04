@@ -71,6 +71,41 @@ PROPERTIES_TABLE = 'nominatim_properties'
 # a native table is about 40 ms faster per search (Japan: 2 GB of RAM).
 PARQUET_MEMORY_TABLES: Tuple[str, ...] = ('search_name', )
 
+# Maximum number of rows in a row group of a Parquet export, unless
+# PARQUET_TABLE_MAX_ROWS has another value for the table.
+PARQUET_MAX_ROWS = 122880
+
+# Tables with larger row groups. A single word of reverse_search_name
+# has up to a million rows, which are read faster from few large groups.
+PARQUET_TABLE_MAX_ROWS: Dict[str, int] = {
+    'reverse_search_name': 524288,
+}
+
+# Row groups of a Parquet export are closed early when the heavy columns
+# of their rows reach a byte budget: table -> (SQL expression for the
+# bytes of a row, budget in bytes). Unlike DuckDB's storage, the Parquet
+# reader decompresses whole pages of a row group even for unselected
+# rows, so rows with large geometries are kept in small row groups that
+# the bbox statistics can skip. A NULL expression counts as 0 bytes.
+# (DuckDB has no octet_length() for VARCHAR; strlen() counts bytes.)
+# Values measured on a country extract (Japan).
+_GEOMETRY_BYTES = 'octet_length(ST_AsWKB(geometry))'
+PARQUET_ROWGROUP_BYTES: Dict[str, Tuple[str, int]] = {
+    'placex': (_GEOMETRY_BYTES, 8 * 1024 * 1024),
+    'search_name': ('strlen(name_vector::VARCHAR) + strlen(nameaddress_vector::VARCHAR)',
+                    8 * 1024 * 1024),
+    'country_osm_grid': (_GEOMETRY_BYTES, 8 * 1024 * 1024),
+    'placex_place_node_areas': (_GEOMETRY_BYTES, 8 * 1024 * 1024),
+    'location_postcodes': (_GEOMETRY_BYTES, 8 * 1024 * 1024),
+}
+
+# Columns with Parquet bloom filters. The places of a lookup by OSM id
+# or place_id are scattered over the spatially sorted placex, so the
+# min/max statistics of the row groups cannot exclude them.
+PARQUET_BLOOM_FILTERS: Dict[str, Tuple[str, ...]] = {
+    'placex': ('osm_id', 'place_id'),
+}
+
 # Geometry columns that are stored as points only.
 POINT_COLUMNS = ('centroid', )
 
