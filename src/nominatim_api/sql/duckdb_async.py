@@ -17,12 +17,16 @@ synchronous DBAPI interface through the greenlet mechanism.
 
 This module therefore wraps the synchronous connection of the
 `duckdb_engine` dialect into a thin shim with coroutine methods and lets
-the standard SQLAlchemy adaptor classes do the rest. The coroutines
-run the DuckDB calls directly, i.e. a query blocks the event loop while
-it executes. This is acceptable for an in-process database and avoids
-the overhead of handing every call over to a worker thread.
+the standard SQLAlchemy adaptor classes do the rest. For local database
+files the coroutines run the DuckDB calls directly, i.e. a query blocks
+the event loop while it executes. This is acceptable for an in-process
+database and avoids the overhead of handing every call over to a worker
+thread. Remote and Parquet sources may wait for seconds on network I/O,
+so their queries and fetches are run in a worker thread instead (connect
+argument `nominatim_offload`).
 """
-from typing import Any, Optional, Sequence, Type
+from typing import Any, Callable, Optional, Sequence, Type
+import asyncio
 
 import sqlalchemy as sa
 from sqlalchemy.connectors.asyncio import AsyncAdapt_dbapi_connection
@@ -30,12 +34,22 @@ from sqlalchemy.dialects.postgresql.psycopg2 import PGExecutionContext_psycopg2
 from duckdb_engine import Dialect as DuckDBDialect
 
 
+async def _run(offload: bool, func: Callable[..., Any], *args: Any) -> Any:
+    """ Run the synchronous DuckDB call `func`, in a worker thread
+        when `offload` is set.
+    """
+    if offload:
+        return await asyncio.to_thread(func, *args)
+    return func(*args)
+
+
 class _AsyncDuckDBCursor:
     """ Coroutine-style facade for a duckdb_engine cursor.
     """
 
-    def __init__(self, cursor: Any) -> None:
+    def __init__(self, cursor: Any, offload: bool = False) -> None:
         self._cursor = cursor
+        self._offload = offload
 
     async def __aenter__(self) -> '_AsyncDuckDBCursor':
         return self
@@ -57,19 +71,21 @@ class _AsyncDuckDBCursor:
         pass  # rows are always fully buffered by the adaptor
 
     async def execute(self, operation: Any, parameters: Any = None) -> Any:
-        return self._cursor.execute(operation, parameters)
+        return await _run(self._offload, self._cursor.execute, operation, parameters)
 
     async def executemany(self, operation: Any, seq_of_parameters: Any) -> Any:
-        return self._cursor.executemany(operation, seq_of_parameters)
+        return await _run(self._offload, self._cursor.executemany,
+                          operation, seq_of_parameters)
 
     async def fetchone(self) -> Optional[Any]:
-        return self._cursor.fetchone()
+        return await _run(self._offload, self._cursor.fetchone)
 
     async def fetchmany(self, size: Optional[int] = None) -> Sequence[Any]:
-        return self._cursor.fetchmany(size)  # type: ignore[no-any-return]
+        return await _run(self._offload, self._cursor.fetchmany,  # type: ignore[no-any-return]
+                          size)
 
     async def fetchall(self) -> Sequence[Any]:
-        return self._cursor.fetchall()  # type: ignore[no-any-return]
+        return await _run(self._offload, self._cursor.fetchall)  # type: ignore[no-any-return]
 
     async def nextset(self) -> Optional[bool]:
         return None
@@ -86,11 +102,12 @@ class _AsyncDuckDBConnection:
         Other attributes are passed through to the synchronous connection.
     """
 
-    def __init__(self, connection: Any) -> None:
+    def __init__(self, connection: Any, offload: bool = False) -> None:
         self._connection = connection
+        self._offload = offload
 
     def cursor(self, *args: Any, **kwargs: Any) -> Any:
-        return _AsyncDuckDBCursor(self._connection.cursor(*args, **kwargs))
+        return _AsyncDuckDBCursor(self._connection.cursor(*args, **kwargs), self._offload)
 
     async def begin(self) -> None:
         self._connection.begin()
@@ -146,6 +163,7 @@ class AsyncDuckDBDialect(DuckDBDialect):  # type: ignore[misc,unused-ignore]
         return sa.pool.AsyncAdaptedQueuePool
 
     def connect(self, *cargs: Any, **cparams: Any) -> Any:
+        offload = bool(cparams.pop('nominatim_offload', False))
         return AsyncAdapt_duckdb_connection(
                     self.loaded_dbapi,
-                    _AsyncDuckDBConnection(super().connect(*cargs, **cparams)))
+                    _AsyncDuckDBConnection(super().connect(*cargs, **cparams), offload))
