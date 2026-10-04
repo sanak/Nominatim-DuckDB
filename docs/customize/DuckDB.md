@@ -108,15 +108,19 @@ and change the DSN.
 
 The first queries after a start have to fetch data from the remote
 storage and are much slower than later queries. Parquet exports usually
-transfer less data than a remote database file.
+transfer less data than a remote database file. With a remote database
+file, single queries right after a start can take tens of seconds (up
+to about 30 s for Japan). Raise
+[NOMINATIM_QUERY_TIMEOUT](Settings.md#nominatim_query_timeout)
+accordingly or use a Parquet export instead.
 
 With a Parquet export, the table `search_name` is copied into memory
 when the frontend opens its first connection, because the search is
-much faster that way. This needs additional memory of about the size of
-the uncompressed table (about 2 GB for Japan) and adds the time to
-download it to the start-up (about 1.5 s for Japan). Do not set the
-DuckDB `memory_limit` (for example with `NOMINATIM_DUCKDB_INIT_SQL`)
-below this size.
+much faster that way. This needs additional memory: loading it raises
+the peak memory use to about 4 GB for Japan. It also adds the time to
+read it to the start-up (for Japan about 4 s from S3, about 1.5 s from
+a local directory). Do not set the DuckDB `memory_limit` (for example
+with `NOMINATIM_DUCKDB_INIT_SQL`) below the size of the table.
 
 ## Limitations
 

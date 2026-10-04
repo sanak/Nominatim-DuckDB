@@ -58,10 +58,11 @@ parameter that is understood by libpq. See the [Postgres documentation](https://
 
 Only used by the experimental, read-only DuckDB frontend, which is
 selected with a database connection string of the form
-`duckdb:dbname=<path or URL of a database file>` or `duckdb:parquet=<directory or URL>`. The `spatial` extension must be
+`duckdb:dbname=<path or URL of a database file>` or
+`duckdb:parquet=<directory or URL>`. The `spatial` extension must be
 installed in this directory. When using remote files or Parquet exports,
-the `httpfs` extension must also be installed. Extensions are never installed or loaded
-automatically at runtime.
+the `httpfs` extension must also be installed. Extensions are never
+installed or loaded automatically at runtime.
 
 
 #### NOMINATIM_DUCKDB_INIT_SQL
