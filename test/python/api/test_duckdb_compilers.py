@@ -814,3 +814,34 @@ def test_near_search_reads_only_places_near_the_anchor(grid_db, grid_api, tmp_pa
     assert {r.place_id for r in results[1:]} == {_grid_id(anchor + d) for d in
                                                  (-1, 1, -GRID_SIDE, GRID_SIDE)}
     _assert_few_placex_rows(profiler, grid_db[1], 5)
+
+
+class _StatementLog:
+    """ Collects the SQL statements run through the API that contain
+        `needle`.
+    """
+
+    def __init__(self, api, needle):
+        self.statements = []
+
+        @sa.event.listens_for(api._async_api._engine.sync_engine, 'before_cursor_execute')
+        def _collect(conn, cursor, statement, *_):
+            if needle in statement:
+                self.statements.append(' '.join(statement.split()))
+
+
+def test_address_details_select_address_lines_first(grid_db, grid_api):
+    """ The address lines of the results are selected in a materialized
+        CTE before they are joined with placex. Without statistics
+        (Parquet views), DuckDB would otherwise join placex with all of
+        place_addressline first.
+    """
+    log = _StatementLog(grid_api, 'place_addressline')
+    results = grid_api.lookup([napi.PlaceID(_grid_id(50))], address_details=True)
+
+    assert len(results[0].address_rows) > 10
+    assert len(log.statements) == 1
+    sql = log.statements[0]
+    assert sql.startswith('WITH addresslines AS MATERIALIZED (SELECT')
+    assert sql.count('FROM place_addressline') == 1
+    assert 'JOIN addresslines ON addresslines.place_id = ' in sql

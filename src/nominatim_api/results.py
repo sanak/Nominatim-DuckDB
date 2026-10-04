@@ -589,7 +589,7 @@ async def complete_address_details(conn: SearchConnection, results: List[BaseRes
                            .table_valued(sa.column('value', type_=sa.JSON))
 
     t = conn.t.placex
-    taddr = conn.t.addressline
+    taddr: SaFromClause = conn.t.addressline
 
     is_duckdb = conn.connection.dialect.name == 'duckdb'
     if is_duckdb:
@@ -598,6 +598,11 @@ async def complete_address_details(conn: SearchConnection, results: List[BaseRes
         lids = sa.func.list_distinct(sa.func.list_value(ltab.c.value['pid'].as_integer(),
                                                         ltab.c.value['lid'].as_integer()))
         ltab = sa.select(ltab.c.value, sa.func.unnest(lids).label('aid')).subquery()
+        # Select the address lines of the lookup ids first. Without statistics
+        # (Parquet views), DuckDB otherwise joins placex with all of
+        # place_addressline before it applies the few lookup ids.
+        taddr = sa.select(taddr).where(taddr.c.place_id.in_(sa.select(ltab.c.aid)))\
+                  .cte('addresslines').prefix_with('MATERIALIZED')
         addr_join = taddr.c.place_id == ltab.c.aid
     else:
         addr_join = sa.or_(taddr.c.place_id == ltab.c.value['pid'].as_integer(),
