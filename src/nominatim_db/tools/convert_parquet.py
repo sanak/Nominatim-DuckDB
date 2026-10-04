@@ -16,7 +16,7 @@ The files are written with pyarrow, because the row groups need to be
 cut by size: DuckDB's own writer has a minimum of 2048 rows per row
 group. See `PARQUET_ROWGROUP_BYTES` in `nominatim_api.sql.duckdb_layout`.
 Geometries are stored as WKB with GeoParquet 1.0 metadata, so that
-DuckDB reads them as GEOMETRY.
+DuckDB reads them as GEOMETRY without a CRS, as in the database.
 """
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 import json
@@ -138,7 +138,10 @@ def _geo_metadata(con: Any, source_sql: str, primary: Optional[str],
                        min(ST_XMin("{col}")), min(ST_YMin("{col}")),
                        max(ST_XMax("{col}")), max(ST_YMax("{col}"))
                   FROM ({source_sql})""").fetchone()
-        meta: Dict[str, Any] = {'encoding': 'WKB',
+        # 'crs': null (undefined CRS) like the GEOMETRY columns of the
+        # database. Without it, DuckDB reads GEOMETRY('OGC:CRS84'), which
+        # cannot be cast to POINT_2D.
+        meta: Dict[str, Any] = {'encoding': 'WKB', 'crs': None,
                                 'geometry_types': sorted(GEOPARQUET_TYPES[t] for t in types or []
                                                          if t in GEOPARQUET_TYPES)}
         if xmin is not None:
@@ -201,9 +204,8 @@ def export_table(con: Any, name: str, source_sql: str, outfile: Path,
     return groups.groups
 
 
-def _normalized_types(con: Any, sql: str) -> List[Tuple[str, str]]:
-    return [(name, 'GEOMETRY' if ctype.startswith('GEOMETRY') else ctype)
-            for name, ctype, *_ in con.execute(f'DESCRIBE {sql}').fetchall()]
+def _column_types(con: Any, sql: str) -> List[Tuple[str, str]]:
+    return [(name, ctype) for name, ctype, *_ in con.execute(f'DESCRIBE {sql}').fetchall()]
 
 
 def verify_table(con: Any, name: str, source_sql: str, outfile: Path) -> None:
@@ -215,8 +217,8 @@ def verify_table(con: Any, name: str, source_sql: str, outfile: Path) -> None:
     if expected != written:
         raise UsageError(f"Parquet export of '{name}' has {written} rows instead of {expected}.")
 
-    source_types = _normalized_types(con, source_sql)
-    parquet_types = _normalized_types(con, parquet_sql)
+    source_types = _column_types(con, source_sql)
+    parquet_types = _column_types(con, parquet_sql)
     if source_types != parquet_types:
         diff = [f'{s[0]}: {s[1]} != {p[1]}' for s, p in zip(source_types, parquet_types)
                 if s != p]

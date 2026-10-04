@@ -89,7 +89,8 @@ def test_export_keeps_types(con, tmp_path):
     assert types['vector'] == 'INTEGER[]'
     assert types['categories'] == 'VARCHAR[]'
     assert types['flag'] == 'BOOLEAN'  # not TINYINT (arrow.bool8)
-    assert types['geometry'].startswith('GEOMETRY')
+    # no CRS: GEOMETRY('OGC:CRS84') cannot be cast to POINT_2D
+    assert types['geometry'] == 'GEOMETRY'
     assert reader.execute(f"SELECT name->>'name' FROM '{out}' LIMIT 1").fetchone()[0] == '東京'
 
 
@@ -104,6 +105,7 @@ def test_export_writes_geoparquet_metadata(con, tmp_path):
     assert geo['version'] == '1.0.0'
     assert geo['primary_column'] == 'geometry'
     assert geo['columns']['geometry']['encoding'] == 'WKB'
+    assert geo['columns']['geometry']['crs'] is None
     assert set(geo['columns']['geometry']['geometry_types']) == {'Point', 'Polygon'}
     assert geo['columns']['geometry']['bbox'] == pytest.approx([0.0, -10.0, 2999.0, 10.0],
                                                                abs=0.01)
@@ -156,6 +158,19 @@ def test_verify_table_detects_type_change(con, tmp_path):
     con.execute(f"COPY (SELECT * REPLACE (name::VARCHAR AS name) FROM placex) TO '{out}'")
     with pytest.raises(UsageError, match='name'):
         convert_parquet.verify_table(con, 'placex', 'SELECT * FROM placex', out)
+
+
+def test_verify_table_detects_geometry_crs(con, tmp_path):
+    import pyarrow.parquet as pq
+    out = tmp_path / 'placex.parquet'
+    data = con.execute('SELECT place_id, ST_AsWKB(geometry) AS geometry FROM placex')\
+              .to_arrow_table()
+    geo = {'version': '1.0.0', 'primary_column': 'geometry',
+           'columns': {'geometry': {'encoding': 'WKB', 'geometry_types': []}}}
+    pq.write_table(data.replace_schema_metadata({b'geo': json.dumps(geo).encode('utf-8')}),
+                   str(out))
+    with pytest.raises(UsageError, match='geometry'):
+        convert_parquet.verify_table(con, 'placex', 'SELECT place_id, geometry FROM placex', out)
 
 
 def test_verify_rowids_detects_reordering(con, tmp_path):
