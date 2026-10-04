@@ -127,6 +127,35 @@ def test_export_bloom_filters(con, tmp_path):
         == [(0, True), (1, False), (2, True)]
 
 
+def column_encodings(path):
+    return {r[0]: (r[1], r[2]) for r in duckdb.connect().execute(
+        f"""SELECT path_in_schema, any_value(compression), any_value(encodings)
+              FROM parquet_metadata('{path}') GROUP BY 1""").fetchall()}
+
+
+def test_export_default_writer_options(con, tmp_path):
+    out = tmp_path / 'placex.parquet'
+    convert_parquet.export_table(con, 'placex', 'SELECT place_id FROM placex', out, None)
+
+    compression, encodings = column_encodings(out)['place_id']
+    assert compression == 'ZSTD'
+    assert 'RLE_DICTIONARY' in encodings
+
+
+def test_export_writer_options(con, tmp_path):
+    out = tmp_path / 'placex.parquet'
+    convert_parquet.export_table(
+        con, 'placex', 'SELECT place_id, vector, name FROM placex', out, None,
+        writer_options={'compression': 'lz4_raw', 'use_dictionary': ['name'],
+                        'column_encoding': {'place_id': 'DELTA_BINARY_PACKED'}})
+
+    columns = column_encodings(out)
+    assert {c[0] for c in columns.values()} == {'LZ4_RAW'}
+    assert 'DELTA_BINARY_PACKED' in columns['place_id'][1]
+    assert 'RLE_DICTIONARY' not in columns['vector, list, element'][1]
+    assert 'RLE_DICTIONARY' in columns['name'][1]
+
+
 def test_import_pyarrow_missing(monkeypatch):
     monkeypatch.setitem(sys.modules, 'pyarrow', None)
     with pytest.raises(UsageError, match='pyarrow'):
@@ -230,6 +259,10 @@ def test_convert_uses_table_settings(source_db, tmp_path, monkeypatch):
     assert {r[0] for r in reader.execute(
         f"""SELECT DISTINCT path_in_schema FROM parquet_metadata('{placex}')
              WHERE bloom_filter_offset IS NOT NULL""").fetchall()} == {'osm_id', 'place_id'}
+    columns = column_encodings(placex)
+    assert columns['place_id'][0] == 'LZ4_RAW'
+    assert 'RLE_DICTIONARY' not in columns['place_id'][1]
+    assert 'RLE_DICTIONARY' in columns['class'][1]
 
 
 def test_convert_without_search_has_no_search_tables(source_db, tmp_path):

@@ -42,7 +42,7 @@ tables in PARQUET_MEMORY_TABLES are loaded into memory instead, with the
 Parquet row number in a regular column `rowid` (which takes precedence
 over DuckDB's row id pseudo column).
 """
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_asyncio
@@ -79,6 +79,8 @@ PARQUET_MAX_ROWS = 122880
 # has up to a million rows, which are read faster from few large groups.
 PARQUET_TABLE_MAX_ROWS: Dict[str, int] = {
     'reverse_search_name': 524288,
+    # Looked up by a few tokens per search: small groups decode less.
+    'word': 16384,
 }
 
 # Row groups of a Parquet export are closed early when the heavy columns
@@ -104,6 +106,25 @@ PARQUET_ROWGROUP_BYTES: Dict[str, Tuple[str, int]] = {
 # min/max statistics of the row groups cannot exclude them.
 PARQUET_BLOOM_FILTERS: Dict[str, Tuple[str, ...]] = {
     'placex': ('osm_id', 'place_id'),
+}
+
+# Compression and encodings of a Parquet file, as keyword arguments of
+# pyarrow's ParquetWriter. The default is zstd with dictionaries for all
+# columns. To get to the selected rows, the Parquet reader decompresses
+# and decodes all pages of a row group before them, for every selected
+# column. The tables that searches read row by row therefore use
+# encodings that are cheaper to decode: lz4 and plain values in placex
+# (dictionaries only for columns with few distinct values), plain
+# place_ids in reverse_search_name and delta-encoded place_ids in
+# placex_rowids.
+PARQUET_WRITER_OPTIONS: Dict[str, Dict[str, Any]] = {
+    'placex': {'compression': 'lz4_raw',
+               'use_dictionary': ['osm_type', 'class', 'type', 'country_code',
+                                  'rank_address', 'rank_search', 'admin_level',
+                                  'indexed_status']},
+    'reverse_search_name': {'use_dictionary': ['column', 'word']},
+    'placex_rowids': {'use_dictionary': False,
+                      'column_encoding': {'place_id': 'DELTA_BINARY_PACKED'}},
 }
 
 # Geometry columns that are stored as points only.

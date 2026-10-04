@@ -18,7 +18,7 @@ group. See `PARQUET_ROWGROUP_BYTES` in `nominatim_api.sql.duckdb_layout`.
 Geometries are stored as WKB with GeoParquet 1.0 metadata, so that
 DuckDB reads them as GEOMETRY without a CRS, as in the database.
 """
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple, Union
 import json
 import logging
 import shutil
@@ -28,6 +28,7 @@ import nominatim_api as napi
 from nominatim_api.sql.duckdb_layout import (BBOX_TABLES, PARQUET_BLOOM_FILTERS,
                                              PARQUET_MAX_ROWS, PARQUET_ROWGROUP_BYTES,
                                              PARQUET_TABLE_MAX_ROWS, PARQUET_TABLES_PROPERTY,
+                                             PARQUET_WRITER_OPTIONS,
                                              PLACEX_ROWID_TABLE, PROPERTIES_TABLE,
                                              STORAGE_FORMAT_PROPERTY)
 
@@ -156,13 +157,16 @@ def _geo_metadata(con: Any, source_sql: str, primary: Optional[str],
 def export_table(con: Any, name: str, source_sql: str, outfile: Path,
                  budget: Optional[Tuple[str, int]],
                  max_rows: int = PARQUET_MAX_ROWS,
-                 bloom_filters: Sequence[str] = ()) -> int:
+                 bloom_filters: Sequence[str] = (),
+                 writer_options: Mapping[str, Any] = {}) -> int:
     """ Write the rows of `source_sql` in their physical order to the
         Parquet file `outfile`. `budget` is the (SQL expression, bytes)
         pair from PARQUET_ROWGROUP_BYTES or None, `max_rows` the row
         limit of a row group and `bloom_filters` the columns that get
-        Parquet bloom filters (with pyarrow's defaults). Returns the
-        number of row groups.
+        Parquet bloom filters (with pyarrow's defaults).
+        `writer_options` are keyword arguments of pyarrow's ParquetWriter
+        that replace the defaults (zstd compression). Returns the number
+        of row groups.
     """
     pa = import_pyarrow()
 
@@ -187,7 +191,8 @@ def export_table(con: Any, name: str, source_sql: str, outfile: Path,
     if geo is not None:
         schema = schema.with_metadata({b'geo': geo})
 
-    writer = pa.parquet.ParquetWriter(str(outfile), schema, compression='zstd',
+    writer = pa.parquet.ParquetWriter(str(outfile), schema,
+                                      **{'compression': 'zstd', **writer_options},
                                       bloom_filter_options={c: True for c in bloom_filters})
     try:
         groups = _RowGroupWriter(pa, writer, schema, max_rows, budget[1] if budget else None)
@@ -295,7 +300,8 @@ async def convert(project_dir: Optional[Union[str, Path]], outdir: Path,
                 outfile = outdir / f'{table}.parquet'
                 export_table(con, table, source_sql, outfile, PARQUET_ROWGROUP_BYTES.get(table),
                              max_rows=PARQUET_TABLE_MAX_ROWS.get(table, PARQUET_MAX_ROWS),
-                             bloom_filters=PARQUET_BLOOM_FILTERS.get(table, ()))
+                             bloom_filters=PARQUET_BLOOM_FILTERS.get(table, ()),
+                             writer_options=PARQUET_WRITER_OPTIONS.get(table, {}))
                 verify_table(con, table, source_sql, outfile)
             if 'placex' in tables:
                 verify_rowids(con, outdir / 'placex.parquet')
