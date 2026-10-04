@@ -197,7 +197,8 @@ class AddressSearch(base.AbstractSearch):
             # be in the name. No search for named POIs with the given house number.
             sql = sql.where(t.c.address_rank.between(16, 27))
 
-        inner = sql.limit(10000).order_by(sa.desc(sa.text('importance'))).subquery()
+        sql = sql.order_by(sa.desc(sa.text('importance')))
+        inner = base.order_ties_by_place_id(sql, conn, t.c.place_id).limit(10000).subquery()
 
         sql = sa.select(inner.c.place_id, inner.c.penalty)
 
@@ -308,6 +309,7 @@ class AddressSearch(base.AbstractSearch):
                                   (unsort.c.interpol_hnr != None, 2),
                                   (unsort.c.tiger_hnr != None, 3),
                                   else_=4))
+        sql = base.order_ties_by_place_id(sql, conn, unsort.c.place_id)
 
         sql = sql.limit(LIMIT_PARAM)
 

@@ -110,9 +110,10 @@ class PlaceSearch(base.AbstractSearch):
 
         sql = sql.add_columns(penalty.label('penalty'))
 
-        inner = sql.limit(5000 if self.qualifiers else 1000)\
-                   .order_by(sa.desc(sa.text('importance')))\
-                   .subquery()
+        sql = sql.order_by(sa.desc(sa.text('importance')))
+        inner = base.order_ties_by_place_id(sql, conn, t.c.place_id)\
+                    .limit(5000 if self.qualifiers else 1000)\
+                    .subquery()
 
         sql = sa.select(inner.c.place_id, inner.c.importance, inner.c.penalty)
 
@@ -189,6 +190,7 @@ class PlaceSearch(base.AbstractSearch):
 
         sql = sql.add_columns(penalty.label('accuracy'))\
                  .order_by(sa.text('accuracy'))
+        sql = base.order_ties_by_place_id(sql, conn, t.c.place_id)
 
         sql = sql.where(t.c.linked_place_id == None)\
                  .where(t.c.indexed_status == 0)

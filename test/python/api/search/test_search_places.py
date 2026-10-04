@@ -293,3 +293,36 @@ class TestLayersRank30:
                              details=SearchDetails(layers=layer))
 
         assert [r.place_id for r in results] == res
+
+
+def test_duckdb_tied_results_ordered_by_place_id(apiobj, frontend, is_duckdb):
+    if not is_duckdb:
+        pytest.skip('tie-breaker only applies to DuckDB')
+    for i in range(6):
+        apiobj.add_placex(place_id=1010 - i, centroid=(i * 3.0, i * 2.0))
+        apiobj.add_search_name(1010 - i, names=[55], importance=0.01,
+                               centroid=(i * 3.0, i * 2.0))
+
+    lookup = FieldLookup('name_vector', [55], LookupAll)
+
+    results = run_search(apiobj, frontend, 0.1, [lookup], [],
+                         details=SearchDetails(max_results=3))
+
+    assert [r.place_id for r in results] == [1005, 1006, 1007]
+
+
+def test_duckdb_tied_candidates_preselected_by_place_id(apiobj, frontend, is_duckdb):
+    if not is_duckdb:
+        pytest.skip('tie-breaker only applies to DuckDB')
+    # More tied candidates than the preselection in search_name keeps.
+    for i in range(1001):
+        apiobj.add_placex(place_id=3000 - i, centroid=(i * 0.01, i * 0.01))
+        apiobj.add_search_name(3000 - i, names=[55], importance=0.01,
+                               centroid=(i * 0.01, i * 0.01))
+
+    lookup = FieldLookup('name_vector', [55], LookupAll)
+
+    results = run_search(apiobj, frontend, 0.1, [lookup], [],
+                         details=SearchDetails(max_results=1))
+
+    assert [r.place_id for r in results] == [2000]

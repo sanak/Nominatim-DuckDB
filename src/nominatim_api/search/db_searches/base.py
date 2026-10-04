@@ -172,6 +172,19 @@ def no_index(expr: SaColumn) -> SaColumn:
     return sa.func.coalesce(sa.null(), expr)
 
 
+def order_ties_by_place_id(sql: SaSelect, conn: SearchConnection,
+                           place_id: SaColumn) -> SaSelect:
+    """ On DuckDB, order rows with equal sort keys by place_id.
+
+        DuckDB executes in parallel, so that rows with equal sort keys
+        come out in arbitrary order and a LIMIT may keep different places
+        from run to run.
+    """
+    if conn.connection.dialect.name == 'duckdb':
+        return sql.order_by(place_id)
+    return sql
+
+
 def filter_by_area(sql: SaSelect, t: SaFromClause,
                    details: SearchDetails, avoid_index: bool = False) -> SaSelect:
     """ Apply SQL statements for filtering by viewbox and near point,

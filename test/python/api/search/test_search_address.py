@@ -285,3 +285,22 @@ class TestTiger:
 
         assert results[0].place_id == 992
         assert geom.name.lower() in results[0].geometry
+
+
+def test_duckdb_tied_streets_ordered_by_place_id(apiobj, frontend, is_duckdb):
+    if not is_duckdb:
+        pytest.skip('tie-breaker only applies to DuckDB')
+    for i in range(6):
+        apiobj.add_placex(place_id=1010 - i, class_='highway', type='residential',
+                          rank_search=26, rank_address=26,
+                          centroid=(i * 3.0, i * 2.0))
+        apiobj.add_search_name(1010 - i, names=[55], importance=0.01,
+                               search_rank=26, address_rank=26,
+                               centroid=(i * 3.0, i * 2.0))
+
+    lookup = FieldLookup('name_vector', [55], LookupAll)
+
+    results = run_search(apiobj, frontend, 0.1, [lookup], [], hnrs=['20'],
+                         details=SearchDetails(max_results=3))
+
+    assert [r.place_id for r in results] == [1005, 1006, 1007]
