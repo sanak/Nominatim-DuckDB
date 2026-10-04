@@ -62,3 +62,26 @@ async def test_offloaded_fetch_does_not_block_event_loop():
 async def test_inline_execute_runs_on_event_loop():
     ticks, _ = await _ticks_during(_AsyncDuckDBCursor(SlowCursor()).execute('SELECT 1'))
     assert ticks == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_offloaded_query_is_interrupted():
+    duckdb = pytest.importorskip('duckdb')
+    from duckdb_engine import ConnectionWrapper
+    from nominatim_api.sql.duckdb_async import _AsyncDuckDBConnection
+
+    conn = _AsyncDuckDBConnection(ConnectionWrapper(duckdb.connect()), offload=True)
+    try:
+        cursor = conn.cursor()
+        with pytest.raises(asyncio.TimeoutError):
+            # Runs for many seconds unless interrupted.
+            await asyncio.wait_for(
+                cursor.execute('SELECT count(*) FROM range(100_000_000_000)'), 0.2)
+
+        start = time.monotonic()
+        cursor = conn.cursor()
+        await cursor.execute('SELECT 42')
+        assert await cursor.fetchall() == [(42, )]
+        assert time.monotonic() - start < 2
+    finally:
+        await conn.close()
