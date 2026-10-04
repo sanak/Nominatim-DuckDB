@@ -197,6 +197,14 @@ class AsyncDuckDBDialect(DuckDBDialect):  # type: ignore[misc,unused-ignore]
     def get_pool_class(cls, url: sa.engine.URL) -> Type[sa.pool.Pool]:
         return sa.pool.AsyncAdaptedQueuePool
 
+    def connect_sync(self, *cargs: Any, **cparams: Any) -> Any:
+        """ Open a plain synchronous duckdb_engine connection with the
+            same arguments and so the same DuckDB configuration as the
+            connections of the pool.
+        """
+        cparams.pop('nominatim_offload', None)
+        return super().connect(*cargs, **cparams)
+
     def connect(self, *cargs: Any, **cparams: Any) -> Any:
         offload = bool(cparams.pop('nominatim_offload', False))
         return AsyncAdapt_duckdb_connection(

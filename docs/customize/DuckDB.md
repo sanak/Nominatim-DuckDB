@@ -119,9 +119,11 @@ to about 30 s for Japan). Raise
 accordingly or use a Parquet export instead.
 
 With a Parquet export, the table `search_name` is copied into memory
-when the frontend opens its first connection, because the search is
-much faster that way. This needs additional memory: loading it raises
-the peak memory use to about 4 GB for Japan. It also adds the time to
+when the frontend starts, because the search is much faster that way.
+The copy is kept until the frontend is shut down. This needs additional
+memory: loading it raises the peak memory use to about 4 GB for Japan.
+Each worker process of the web server (for example of gunicorn or
+uvicorn) holds its own copy. It also adds the time to
 read it to the start-up (for Japan about 4 s from S3, about 1.5 s from
 a local directory). Do not set the DuckDB `memory_limit` (for example
 with `NOMINATIM_DUCKDB_INIT_SQL`) below the size of the table.

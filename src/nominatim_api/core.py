@@ -43,6 +43,25 @@ from .results import DetailedResult, ReverseResult, SearchResults
 registry.register('duckdb.aioduckdb', 'nominatim_api.sql.duckdb_async', 'AsyncDuckDBDialect')
 
 
+def _open_duckdb_instance(engine: sa_asyncio.AsyncEngine, connect_args: Dict[str, Any],
+                          connector: duckdb_source.SourceConnector) -> Any:
+    """ Open a synchronous connection to the shared in-memory DuckDB
+        instance of the engine and create the objects of the data source.
+    """
+    dialect: Any = engine.dialect
+    cargs, cparams = dialect.create_connect_args(engine.url)
+    cparams.update(connect_args)
+    connection = dialect.connect_sync(*cargs, **cparams)
+    try:
+        cursor = connection.cursor()
+        cursor.execute('LOAD spatial')
+        connector.setup_instance(cursor)
+    except BaseException:
+        connection.close()
+        raise
+    return connection
+
+
 class NominatimAPIAsync:
     """ The main frontend to the Nominatim database implements the
         functions for lookup, forward and reverse geocoding using
@@ -84,6 +103,9 @@ class NominatimAPIAsync:
         else:
             self._engine_lock = asyncio.Lock(loop=loop)
         self._engine: Optional[sa_asyncio.AsyncEngine] = None
+        # Connection that keeps the shared in-memory DuckDB instance of a
+        # remote or Parquet source open while the engine is in use.
+        self._duckdb_instance: Optional[Any] = None
         self._tables: Optional[SearchTables] = None
         self._property_cache: Dict[str, Any] = {'DB:server_version': 0}
 
@@ -178,10 +200,20 @@ class NominatimAPIAsync:
                     duckdb_functions.install_custom_functions(dbapi_con)
 
                 try:
+                    if connector.needs_instance:
+                        # An in-memory instance only lives while a connection
+                        # to it is open. Keep one open until close(), so that
+                        # the data is attached or loaded only once, also
+                        # without a pool or when all pooled connections have
+                        # been invalidated.
+                        self._duckdb_instance = await asyncio.to_thread(
+                            _open_duckdb_instance, engine,
+                            extra_args['connect_args'], connector)
                     async with engine.begin() as conn:
                         await duckdb_layout.check_layout_version(conn, source.location)
                 except BaseException:
                     await engine.dispose()
+                    self._close_duckdb_instance()
                     raise
             elif is_sqlite:
                 server_version = 0
@@ -221,8 +253,19 @@ class NominatimAPIAsync:
             object remains usable after closing. If a new API functions is
             called, new connections are created.
         """
-        if self._engine is not None:
-            await self._engine.dispose()
+        engine = self._engine
+        if self._duckdb_instance is not None:
+            # The shared DuckDB instance is released, so the source must
+            # be set up again when the API is used after closing.
+            self._engine = None
+        if engine is not None:
+            await engine.dispose()
+        self._close_duckdb_instance()
+
+    def _close_duckdb_instance(self) -> None:
+        if self._duckdb_instance is not None:
+            instance, self._duckdb_instance = self._duckdb_instance, None
+            instance.close()
 
     async def __aenter__(self) -> 'NominatimAPIAsync':
         return self

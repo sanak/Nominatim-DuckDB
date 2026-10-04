@@ -19,7 +19,7 @@ The part of a DuckDB DSN after `duckdb:` names one of:
 Remote and Parquet sources are served from a named in-memory DuckDB
 instance, see `DuckDBSource.instance_name()`.
 """
-from typing import Any, List, Literal, Optional
+from typing import Any, Literal
 import dataclasses
 import hashlib
 
@@ -92,19 +92,54 @@ def quote(value: str) -> str:
 
 
 class SourceConnector:
-    """ Prepares new DuckDB connections for a data source: runs the
-        configured init SQL and makes the tables of remote and Parquet
-        sources available. Call `setup()` with a cursor of every new
-        connection after the spatial extension has been loaded.
+    """ Prepares DuckDB connections for a data source.
+
+        Call `setup()` with a cursor of every new connection after the
+        spatial extension has been loaded. It loads the extensions,
+        changes the settings, runs the configured init SQL and selects
+        the attached database of a remote source.
+
+        Remote and Parquet sources additionally need objects in the
+        shared in-memory instance: the attached database or the views
+        and in-memory tables of a Parquet export. Create them once with
+        `setup_instance()` on a connection that keeps the instance open
+        for as long as the frontend uses it.
     """
 
     def __init__(self, source: DuckDBSource, init_sql: str) -> None:
         self.source = source
         self.init_sql = [s.strip() for s in init_sql.split(';') if s.strip()]
-        self._parquet_tables: Optional[List[str]] = None
+
+    @property
+    def needs_instance(self) -> bool:
+        """ True, when the source is served from a shared in-memory
+            instance that must be set up with `setup_instance()`.
+        """
+        return self.source.kind != 'file'
 
     def setup(self, cursor: Any) -> None:
-        """ Initialise a new connection.
+        """ Initialise a new connection. For remote and Parquet sources,
+            `setup_instance()` must have been run before.
+        """
+        self._setup_session(cursor)
+        if self.source.kind == 'remote':
+            cursor.execute(f'USE {REMOTE_ALIAS}')
+
+    def setup_instance(self, cursor: Any) -> None:
+        """ Initialise the connection that keeps the shared in-memory
+            instance of a remote or Parquet source open and create the
+            objects of the source in the instance.
+        """
+        self._setup_session(cursor)
+        if self.source.kind == 'remote':
+            cursor.execute(f'ATTACH IF NOT EXISTS {quote(self.source.location)}'
+                           f' AS {REMOTE_ALIAS} (READ_ONLY)')
+        elif self.source.kind == 'parquet':
+            self._create_views(cursor)
+
+    def _setup_session(self, cursor: Any) -> None:
+        """ Steps run on every connection: load extensions, change the
+            settings and run the init SQL.
         """
         if is_url(self.source.location):
             cursor.execute('LOAD httpfs')
@@ -113,20 +148,10 @@ class SourceConnector:
         else:
             self._load_httpfs_if_installed(cursor)
 
-        if self.source.kind == 'file':
-            self._run_init_sql(cursor)
-            return
-
-        for sql in CACHE_SETTINGS:
-            cursor.execute(sql)
+        if self.source.kind != 'file':
+            for sql in CACHE_SETTINGS:
+                cursor.execute(sql)
         self._run_init_sql(cursor)
-
-        if self.source.kind == 'remote':
-            cursor.execute(f'ATTACH IF NOT EXISTS {quote(self.source.location)}'
-                           f' AS {REMOTE_ALIAS} (READ_ONLY)')
-            cursor.execute(f'USE {REMOTE_ALIAS}')
-        else:
-            self._create_views(cursor)
 
     @staticmethod
     def _load_httpfs_if_installed(cursor: Any) -> None:
@@ -156,11 +181,9 @@ class SourceConnector:
         cursor.execute(f'CREATE VIEW IF NOT EXISTS "{table}" AS {self._parquet_select(table)}')
 
     def _load_table(self, cursor: Any, table: str) -> None:
-        """ Copy a table into the shared in-memory instance, unless an
-            earlier connection already did. CREATE TABLE IF NOT EXISTS
-            alone would still bind (and so open) the Parquet file. The
-            first connection is made under the setup lock of the API, so
-            two connections never load at the same time.
+        """ Copy a table into the shared in-memory instance, unless it
+            is already there. CREATE TABLE IF NOT EXISTS alone would
+            still bind (and so open) the Parquet file.
         """
         cursor.execute("SELECT count(*) FROM duckdb_tables()"
                        " WHERE database_name = current_database()"
@@ -171,8 +194,8 @@ class SourceConnector:
                            f' AS {self._parquet_select(table)}')
 
     def _create_views(self, cursor: Any) -> None:
-        """ Create a view for every table of the Parquet export. The list
-            of tables is read once from the properties of the export.
+        """ Create a view for every table of the Parquet export, as listed
+            in the properties of the export.
         """
         import duckdb  # only installed with the DuckDB frontend
 
@@ -183,17 +206,17 @@ class SourceConnector:
                              f" (created with 'nominatim convert --format parquet'): {err}"
                              ) from err
 
-        if self._parquet_tables is None:
-            cursor.execute(f"SELECT max(value) FROM {PROPERTIES_TABLE}"
-                           f" WHERE property = {quote(PARQUET_TABLES_PROPERTY)}")
-            row = cursor.fetchone()
-            if row is None or not row[0]:
-                raise UsageError(f"Parquet export at '{self.source.location}' has no property"
-                                 f" '{PARQUET_TABLES_PROPERTY}'. Create it again with"
-                                 " 'nominatim convert --format parquet'.")
-            self._parquet_tables = [t for t in row[0].split(',') if t != PROPERTIES_TABLE]
+        cursor.execute(f"SELECT max(value) FROM {PROPERTIES_TABLE}"
+                       f" WHERE property = {quote(PARQUET_TABLES_PROPERTY)}")
+        row = cursor.fetchone()
+        if row is None or not row[0]:
+            raise UsageError(f"Parquet export at '{self.source.location}' has no property"
+                             f" '{PARQUET_TABLES_PROPERTY}'. Create it again with"
+                             " 'nominatim convert --format parquet'.")
 
-        for table in self._parquet_tables:
+        for table in row[0].split(','):
+            if table == PROPERTIES_TABLE:
+                continue
             if table in PARQUET_MEMORY_TABLES:
                 self._load_table(cursor, table)
             else:

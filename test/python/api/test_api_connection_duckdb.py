@@ -10,6 +10,7 @@ Tests for the experimental read-only DuckDB database backend.
 The tests need the DuckDB 'spatial' extension to be installed in the
 default extension directory.
 """
+import asyncio
 import functools
 import os
 import re
@@ -23,6 +24,7 @@ import sqlalchemy as sa
 import nominatim_api as napi
 from nominatim_api.sql.duckdb_layout import (LAYOUT_VERSION, LAYOUT_VERSION_PROPERTY,
                                              PARQUET_TABLES_PROPERTY, STORAGE_FORMAT_PROPERTY)
+from nominatim_api.sql.duckdb_source import parse_dsn
 
 duckdb = pytest.importorskip('duckdb')
 pytest.importorskip('duckdb_engine')
@@ -440,3 +442,76 @@ async def test_duckdb_parquet_loads_search_name_once(tmp_path):
             # shared instance and does not read the file again.
             async with api.begin() as conn2:
                 assert await conn2.scalar(sa.text('SELECT count(*) FROM search_name')) == 3
+
+
+@pytest.mark.asyncio
+async def test_duckdb_parquet_keeps_search_name_without_pool(tmp_path):
+    make_parquet_dir(tmp_path, tables='nominatim_properties,x,search_name')
+    make_search_name_file(tmp_path)
+
+    async with napi.NominatimAPIAsync(
+            environ={'NOMINATIM_DATABASE_DSN': f'duckdb:parquet={tmp_path}',
+                     'NOMINATIM_API_POOL_SIZE': '0'}) as api:
+        async with api.begin() as conn:
+            assert await conn.scalar(sa.text('SELECT count(*) FROM search_name')) == 3
+        (tmp_path / 'search_name.parquet').unlink()
+        # Without a pool, every request opens a new connection. The shared
+        # instance stays open and the table is not read again.
+        async with api.begin() as conn:
+            assert await conn.scalar(sa.text('SELECT count(*) FROM search_name')) == 3
+
+
+@pytest.mark.asyncio
+async def test_duckdb_remote_keeps_instance_without_pool(http_dir):
+    directory, url = http_dir
+    make_nominatim_duckdb(directory / 'remote.duckdb')
+
+    async with napi.NominatimAPIAsync(
+            environ={'NOMINATIM_DATABASE_DSN': f'duckdb:dbname={url}/remote.duckdb',
+                     'NOMINATIM_API_POOL_SIZE': '0'}) as api:
+        async with api.begin() as conn:
+            await conn.execute(sa.text("ATTACH ':memory:' AS probe"))
+        async with api.begin() as conn:
+            assert await conn.scalar(sa.text(
+                "SELECT count(*) FROM duckdb_databases() WHERE database_name = 'probe'")) == 1
+            assert await conn.scalar(sa.text('SELECT count(*) FROM x')) == 2
+
+
+@pytest.mark.asyncio
+async def test_duckdb_parquet_concurrent_first_connections(tmp_path):
+    make_parquet_dir(tmp_path, tables='nominatim_properties,x,search_name')
+    make_search_name_file(tmp_path)
+
+    async def _count(api):
+        async with api.begin() as conn:
+            return await conn.scalar(sa.text('SELECT count(*) FROM search_name'))
+
+    for _ in range(5):
+        async with napi.NominatimAPIAsync(
+                environ={'NOMINATIM_DATABASE_DSN': f'duckdb:parquet={tmp_path}',
+                         'NOMINATIM_API_POOL_SIZE': '0'}) as api:
+            assert await asyncio.gather(*(_count(api) for _ in range(4))) == [3] * 4
+
+
+@pytest.mark.asyncio
+async def test_duckdb_parquet_close_releases_instance(tmp_path):
+    make_parquet_dir(tmp_path, tables='nominatim_properties,x,search_name')
+    make_search_name_file(tmp_path)
+    instance = parse_dsn(f'parquet={tmp_path}').instance_name('')
+
+    api = napi.NominatimAPIAsync(environ={'NOMINATIM_DATABASE_DSN': f'duckdb:parquet={tmp_path}'})
+    async with api.begin() as conn:
+        assert await conn.scalar(sa.text('SELECT count(*) FROM search_name')) == 3
+    await api.close()
+
+    # A new connection with a different configuration would be refused
+    # if the instance were still open.
+    with duckdb.connect(instance) as conn:
+        assert conn.execute('SELECT count(*) FROM duckdb_tables()').fetchone()[0] == 0
+        assert conn.execute('SELECT count(*) FROM duckdb_views()'
+                            ' WHERE NOT internal').fetchone()[0] == 0
+
+    # The API can be used again after closing.
+    async with api.begin() as conn:
+        assert await conn.scalar(sa.text('SELECT count(*) FROM search_name')) == 3
+    await api.close()
