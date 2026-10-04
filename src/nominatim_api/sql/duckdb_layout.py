@@ -76,12 +76,13 @@ EXTRA_BBOX_COLUMNS: Dict[str, Tuple[str, ...]] = {
 PLACEX_ROWID_TABLE = 'placex_rowids'
 
 
-async def check_layout_version(conn: sa_asyncio.AsyncConnection, dbfile: str) -> None:
+async def check_layout_version(conn: sa_asyncio.AsyncConnection, location: str) -> None:
     """ Make sure that a database created by `nominatim convert` has the
-        layout of this version of the frontend. Files without the table
-        nominatim_properties are not Nominatim databases and are not checked.
+        layout of this version of the frontend. Databases without the table
+        (or view) nominatim_properties are not Nominatim databases and are
+        not checked.
     """
-    if not await conn.scalar(sa.text("SELECT count(*) FROM duckdb_tables()"
+    if not await conn.scalar(sa.text("SELECT count(*) FROM information_schema.tables"
                                      " WHERE table_name = 'nominatim_properties'")):
         return
 
@@ -89,7 +90,7 @@ async def check_layout_version(conn: sa_asyncio.AsyncConnection, dbfile: str) ->
                                         " WHERE property = :name"),
                                 {'name': LAYOUT_VERSION_PROPERTY})
     if version != str(LAYOUT_VERSION):
-        raise UsageError(f"DuckDB database '{dbfile}' has layout version"
+        raise UsageError(f"DuckDB database '{location}' has layout version"
                          f" {version or 'unknown'}, but this version of Nominatim needs"
                          f" layout version {LAYOUT_VERSION}. Create the database again"
                          " with 'nominatim convert'.")

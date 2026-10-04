@@ -91,8 +91,8 @@ jobs:
               run: ./venv/bin/pip install pytest-bdd
 
             # Nominatim never downloads DuckDB extensions itself.
-            - name: Install DuckDB spatial extension
-              run: ./venv/bin/python -c "import duckdb; duckdb.connect().install_extension('spatial')"
+            - name: Install DuckDB spatial and httpfs extensions
+              run: ./venv/bin/python -c "import duckdb; c = duckdb.connect(); c.install_extension('spatial'); c.install_extension('httpfs')"
 
             - name: Install latest flake8
               run: ./venv/bin/pip install -U flake8
@@ -190,8 +190,8 @@ jobs:
                   python -m pip install "duckdb>=1.1" duckdb-engine pytz
 
             # Nominatim never downloads DuckDB extensions itself.
-            - name: Install DuckDB spatial extension
-              run: python -c "import duckdb; duckdb.connect().install_extension('spatial')"
+            - name: Install DuckDB spatial and httpfs extensions
+              run: python -c "import duckdb; c = duckdb.connect(); c.install_extension('spatial'); c.install_extension('httpfs')"
 
             - name: Python unit tests
               run: |
