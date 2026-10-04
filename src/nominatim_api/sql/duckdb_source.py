@@ -106,14 +106,17 @@ class SourceConnector:
     def setup(self, cursor: Any) -> None:
         """ Initialise a new connection.
         """
-        if self.source.kind == 'file':
-            self._run_init_sql(cursor)
-            return
-
         if is_url(self.source.location):
             cursor.execute('LOAD httpfs')
             for sql in HTTP_CACHE_SETTINGS:
                 cursor.execute(sql)
+        else:
+            self._load_httpfs_if_installed(cursor)
+
+        if self.source.kind == 'file':
+            self._run_init_sql(cursor)
+            return
+
         for sql in CACHE_SETTINGS:
             cursor.execute(sql)
         self._run_init_sql(cursor)
@@ -124,6 +127,19 @@ class SourceConnector:
             cursor.execute(f'USE {REMOTE_ALIAS}')
         else:
             self._create_views(cursor)
+
+    @staticmethod
+    def _load_httpfs_if_installed(cursor: Any) -> None:
+        """ Load httpfs for a local source when it is installed, so that
+            init SQL written for remote sources (e.g. `CREATE SECRET` of
+            type s3) works with local sources, too. Extensions are never
+            installed or loaded automatically.
+        """
+        cursor.execute("SELECT count(*) FROM duckdb_extensions()"
+                       " WHERE extension_name = 'httpfs' AND installed")
+        row = cursor.fetchone()
+        if row is not None and row[0]:
+            cursor.execute('LOAD httpfs')
 
     def _run_init_sql(self, cursor: Any) -> None:
         for sql in self.init_sql:

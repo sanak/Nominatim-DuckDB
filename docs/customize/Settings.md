@@ -76,6 +76,8 @@ automatically at runtime.
 Only used by the experimental DuckDB frontend. The statements are run
 after the extensions have been loaded, so they can create secrets for
 remote storage or change settings like `memory_limit` and `threads`.
+`httpfs` is loaded for local files, too, when it is installed, so that
+the same secrets can be used with local and remote data.
 The statements must not contain `;` inside string literals.
 
 

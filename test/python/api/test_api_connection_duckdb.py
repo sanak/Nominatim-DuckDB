@@ -266,6 +266,27 @@ async def test_duckdb_init_sql_is_run(duckdb_file):
             assert await conn.scalar(sa.text("SELECT current_setting('threads')")) == 1
 
 
+@pytest.fixture
+def httpfs_installed():
+    try:
+        duckdb.connect(config={'autoinstall_known_extensions': False})\
+              .execute('LOAD httpfs')
+    except duckdb.Error:
+        pytest.skip('DuckDB extension httpfs is not installed')
+
+
+S3_SECRET_SQL = "CREATE SECRET (TYPE s3, KEY_ID 'k', SECRET 's', REGION 'us-east-1')"
+
+
+@pytest.mark.asyncio
+async def test_duckdb_init_sql_with_s3_secret_on_local_file(duckdb_file, httpfs_installed):
+    async with napi.NominatimAPIAsync(
+            environ={'NOMINATIM_DATABASE_DSN': f'duckdb:dbname={duckdb_file}',
+                     'NOMINATIM_DUCKDB_INIT_SQL': S3_SECRET_SQL}) as api:
+        async with api.begin() as conn:
+            assert await conn.scalar(sa.text('SELECT count(*) FROM x')) == 2
+
+
 def make_parquet_dir(directory, tables='nominatim_properties,x', version=str(LAYOUT_VERSION)):
     with duckdb.connect() as conn:
         conn.execute("CREATE TABLE x AS SELECT * FROM (VALUES (42, 'a'), (43, 'b')) t(v, s)")
@@ -288,6 +309,17 @@ async def test_duckdb_parquet_local_directory(tmp_path):
             result = await conn.execute(sa.text('SELECT rowid, v, s FROM x ORDER BY rowid'))
             assert [tuple(r) for r in result] == [(0, 42, 'a'), (1, 43, 'b')]
             assert await conn.scalar(sa.text('SELECT v FROM x WHERE rowid IN (1)')) == 43
+
+
+@pytest.mark.asyncio
+async def test_duckdb_init_sql_with_s3_secret_on_local_parquet(tmp_path, httpfs_installed):
+    make_parquet_dir(tmp_path)
+
+    async with napi.NominatimAPIAsync(
+            environ={'NOMINATIM_DATABASE_DSN': f'duckdb:parquet={tmp_path}',
+                     'NOMINATIM_DUCKDB_INIT_SQL': S3_SECRET_SQL}) as api:
+        async with api.begin() as conn:
+            assert await conn.scalar(sa.text('SELECT count(*) FROM x')) == 2
 
 
 @pytest.mark.asyncio
