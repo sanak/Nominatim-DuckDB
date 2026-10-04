@@ -51,6 +51,20 @@ environment variables `DUCKDB_MEMORY_LIMIT` and `DUCKDB_TEMP_DIR` can be
 used to restrict the memory DuckDB uses during the conversion and to set
 the directory where it writes data that does not fit into memory.
 
+### Creating Parquet files
+
+The database can also be exported as a directory with one Parquet file
+per table:
+
+    nominatim convert --format parquet -o /srv/nominatim-parquet/
+
+The Parquet export needs the Python package `pyarrow` (>= 24) during the
+conversion only. The output directory must be new or empty. A DuckDB
+database is created in it first and removed at the end; add
+`--keep-duckdb` to keep it as `nominatim.duckdb`, for example to serve
+the same data as a database file. During the conversion, the directory
+needs space for both the DuckDB database and the Parquet files.
+
 ## Using a DuckDB database
 
 Once you have created the database, you can use it by simply pointing the
@@ -67,9 +81,47 @@ Nominatim. When Nominatim is updated to a version with a different layout,
 it refuses to open older database files with an error message. Create
 the database again with `nominatim convert` in that case.
 
+### Remote databases and Parquet files
+
+A database file or a Parquet export can also be read from object storage
+or a web server. The DuckDB extension `httpfs` must be installed
+beforehand in the same way as `spatial`:
+
+    /srv/nominatim-venv/bin/python -c "import duckdb; duckdb.connect().install_extension('httpfs')"
+
+Point the DSN to the remote database file or to the Parquet directory:
+
+    NOMINATIM_DATABASE_DSN=duckdb:dbname=s3://my-bucket/nominatim/2026-10-04/nominatim.duckdb
+    NOMINATIM_DATABASE_DSN=duckdb:parquet=s3://my-bucket/nominatim/2026-10-04/
+
+`parquet=` also accepts a local directory. Credentials for S3 are taken
+from the usual AWS environment variables (`AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`). For other
+setups, for example S3-compatible storage, create a DuckDB secret with
+[NOMINATIM_DUCKDB_INIT_SQL](Settings.md#nominatim_duckdb_init_sql):
+
+    NOMINATIM_DUCKDB_INIT_SQL="CREATE SECRET (TYPE s3, KEY_ID '...', SECRET '...', ENDPOINT 'storage.example.com', URL_STYLE 'path')"
+
+Remote data is cached in memory and never checked for changes. Never
+replace files in place: put a new version of the data under a new path
+and change the DSN.
+
+The first queries after a start have to fetch data from the remote
+storage and are much slower than later queries. Parquet exports usually
+transfer less data than a remote database file.
+
+With a Parquet export, the table `search_name` is copied into memory
+when the frontend opens its first connection, because the search is
+much faster that way. This needs additional memory of about the size of
+the uncompressed table (about 2 GB for Japan) and adds the time to
+download it to the start-up (about 1.5 s for Japan). Do not set the
+DuckDB `memory_limit` (for example with `NOMINATIM_DUCKDB_INIT_SQL`)
+below this size.
+
 ## Limitations
 
 * The database is read-only. Updates are not possible; convert the
   PostgreSQL database again to get newer data.
+* Remote databases and Parquet files are read-only, like local databases.
 * Geometry output in KML format (`polygon_kml`) is not supported and
   results in an error.
