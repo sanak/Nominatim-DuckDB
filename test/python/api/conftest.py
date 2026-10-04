@@ -192,25 +192,31 @@ def apiobj(temp_db_with_extensions, temp_db_conn, monkeypatch):
 
 @pytest.fixture
 def is_duckdb(request):
-    """ True, when the test runs against the DuckDB variant of 'frontend'.
+    """ True, when the test runs against a DuckDB variant of 'frontend'.
     """
     callspec = getattr(request.node, 'callspec', None)
-    return callspec is not None and callspec.params.get('frontend') == 'duckdb_db'
+    return callspec is not None \
+        and callspec.params.get('frontend') in ('duckdb_db', 'duckdb_parquet')
 
 
-@pytest.fixture(params=['postgres_db', 'sqlite_db', 'duckdb_db'])
+@pytest.fixture(params=['postgres_db', 'sqlite_db', 'duckdb_db', 'duckdb_parquet'])
 def frontend(request, tmp_path):
     testapis = []
-    if request.param in ('sqlite_db', 'duckdb_db'):
-        kind = request.param[:-3]
-        if kind == 'duckdb':
+    if request.param in ('sqlite_db', 'duckdb_db', 'duckdb_parquet'):
+        kind = {'sqlite_db': 'sqlite', 'duckdb_db': 'duckdb',
+                'duckdb_parquet': 'parquet'}[request.param]
+        if kind in ('duckdb', 'parquet'):
             pytest.importorskip('duckdb')
             pytest.importorskip('duckdb_engine')
+        if kind == 'parquet':
+            pytest.importorskip('pyarrow', minversion='24')
+            from nominatim_db.tools import convert_parquet
+            converter = convert_parquet
+        elif kind == 'duckdb':
             from nominatim_db.tools import convert_duckdb
             converter = convert_duckdb
         else:
             converter = convert_sqlite
-        db = str(tmp_path / f'test_nominatim_python_unittest.{kind}')
 
         def mkapi(apiobj, options={'reverse'}):
             apiobj.add_data(
@@ -230,8 +236,14 @@ def frontend(request, tmp_path):
 
             apiobj.async_to_sync(_do_sql())
 
+            if kind == 'parquet':
+                db = str(tmp_path / f'parquet{len(testapis)}')
+                dsn = f'duckdb:parquet={db}'
+            else:
+                db = str(tmp_path / f'test_nominatim_python_unittest.{kind}')
+                dsn = f'{kind}:dbname={db}'
             apiobj.async_to_sync(converter.convert(None, db, options))
-            outapi = napi.NominatimAPI(environ={'NOMINATIM_DATABASE_DSN': f"{kind}:dbname={db}",
+            outapi = napi.NominatimAPI(environ={'NOMINATIM_DATABASE_DSN': dsn,
                                                 'NOMINATIM_USE_US_TIGER_DATA': 'yes'})
             testapis.append(outapi)
 
