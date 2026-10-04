@@ -275,7 +275,8 @@ def httpfs_installed():
         pytest.skip('DuckDB extension httpfs is not installed')
 
 
-S3_SECRET_SQL = "CREATE SECRET (TYPE s3, KEY_ID 'k', SECRET 's', REGION 'us-east-1')"
+S3_SECRET_SQL = ("CREATE SECRET IF NOT EXISTS nominatim_s3"
+                 " (TYPE s3, KEY_ID 'k', SECRET 's', REGION 'us-east-1')")
 
 
 @pytest.mark.asyncio
@@ -320,6 +321,26 @@ async def test_duckdb_init_sql_with_s3_secret_on_local_parquet(tmp_path, httpfs_
                      'NOMINATIM_DUCKDB_INIT_SQL': S3_SECRET_SQL}) as api:
         async with api.begin() as conn:
             assert await conn.scalar(sa.text('SELECT count(*) FROM x')) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kind', ['dbname', 'parquet'])
+async def test_duckdb_init_sql_with_s3_secret_on_two_connections(tmp_path, duckdb_file,
+                                                                 httpfs_installed, kind):
+    # The init SQL runs on every new connection, while secrets belong to
+    # the DuckDB instance, which the connections share.
+    if kind == 'parquet':
+        make_parquet_dir(tmp_path)
+        dsn = f'duckdb:parquet={tmp_path}'
+    else:
+        dsn = f'duckdb:dbname={duckdb_file}'
+
+    async with napi.NominatimAPIAsync(
+            environ={'NOMINATIM_DATABASE_DSN': dsn,
+                     'NOMINATIM_DUCKDB_INIT_SQL': S3_SECRET_SQL}) as api:
+        async with api.begin() as conn1, api.begin() as conn2:
+            assert await conn1.scalar(sa.text('SELECT count(*) FROM x')) == 2
+            assert await conn2.scalar(sa.text('SELECT count(*) FROM x')) == 2
 
 
 @pytest.mark.asyncio

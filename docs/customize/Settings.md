@@ -81,6 +81,12 @@ remote storage or change settings like `memory_limit` and `threads`.
 the same secrets can be used with local and remote data.
 The statements must not contain `;` inside string literals.
 
+The statements are run for every new connection, but all connections
+of the frontend share one DuckDB instance with its secrets and global
+settings. So the statements must be safe to repeat. Create secrets with
+a name and `IF NOT EXISTS`, for example
+`CREATE SECRET IF NOT EXISTS nominatim_s3 (TYPE s3, ...)`.
+
 
 #### NOMINATIM_DATABASE_WEBUSER
 

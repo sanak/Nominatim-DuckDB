@@ -100,7 +100,11 @@ from the usual AWS environment variables (`AWS_ACCESS_KEY_ID`,
 setups, for example S3-compatible storage, create a DuckDB secret with
 [NOMINATIM_DUCKDB_INIT_SQL](Settings.md#nominatim_duckdb_init_sql):
 
-    NOMINATIM_DUCKDB_INIT_SQL="CREATE SECRET (TYPE s3, KEY_ID '...', SECRET '...', ENDPOINT 'storage.example.com', URL_STYLE 'path')"
+    NOMINATIM_DUCKDB_INIT_SQL="CREATE SECRET IF NOT EXISTS nominatim_s3 (TYPE s3, KEY_ID '...', SECRET '...', ENDPOINT 'storage.example.com', URL_STYLE 'path')"
+
+The statements are run for every new connection, and the connections
+share secrets and global settings. Write them so that they can be run
+again: use `CREATE SECRET IF NOT EXISTS` with a name, as above.
 
 Remote data is cached in memory and never checked for changes. Never
 replace files in place: put a new version of the data under a new path
