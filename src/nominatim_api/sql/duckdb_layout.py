@@ -33,6 +33,14 @@ that contain the places. The table `placex_rowids` (see
 place_id, so that a lookup in it reads only the row groups of the ids.
 Join both on place_id and on the row id: with more rows than the
 threshold, DuckDB falls back to the place_id filter.
+
+A Parquet export has the same tables with the same rows in the same
+order, one file `<table>.parquet` per table. The frontend exposes each
+file as a view with the Parquet row number as `rowid`, which therefore
+equals the row id of the database file and `placex_rowids.rid`. The
+tables in PARQUET_MEMORY_TABLES are loaded into memory instead, with the
+Parquet row number in a regular column `rowid` (which takes precedence
+over DuckDB's row id pseudo column).
 """
 from typing import Dict, Tuple
 
@@ -47,6 +55,21 @@ from ..typing import SaColumn
 # saves it in nominatim_properties under LAYOUT_VERSION_PROPERTY.
 LAYOUT_VERSION = 1
 LAYOUT_VERSION_PROPERTY = 'duckdb_layout_version'
+
+# Properties of a Parquet export (`nominatim convert --format parquet`):
+# the storage format ('parquet'; a database file has no such property)
+# and the comma-separated list of exported tables, which includes
+# PROPERTIES_TABLE itself.
+STORAGE_FORMAT_PROPERTY = 'duckdb_storage_format'
+PARQUET_TABLES_PROPERTY = 'duckdb_parquet_tables'
+PROPERTIES_TABLE = 'nominatim_properties'
+
+# Tables of a Parquet export that are copied into the shared in-memory
+# instance at the first connection instead of being read through a view.
+# The Parquet reader has no statistics for the planner and has to map
+# place_ids to row ids of search_name with a full scan for every search;
+# a native table is about 40 ms faster per search (Japan: 2 GB of RAM).
+PARQUET_MEMORY_TABLES: Tuple[str, ...] = ('search_name', )
 
 # Geometry columns that are stored as points only.
 POINT_COLUMNS = ('centroid', )

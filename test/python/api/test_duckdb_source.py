@@ -7,6 +7,9 @@
 """
 Tests for the parsing of DuckDB data source names.
 """
+import importlib
+import sys
+
 import pytest
 
 from nominatim_api.errors import UsageError
@@ -55,3 +58,11 @@ def test_instance_name_is_stable_and_specific():
 def test_parquet_file(location):
     assert DuckDBSource('parquet', location).parquet_file('placex') \
         == 's3://b/japan/placex.parquet'
+
+
+def test_module_does_not_need_duckdb(monkeypatch):
+    import nominatim_api.sql.duckdb_source as module
+    monkeypatch.setitem(sys.modules, 'duckdb', None)  # import duckdb raises ImportError
+    importlib.reload(module)
+    monkeypatch.undo()
+    importlib.reload(module)

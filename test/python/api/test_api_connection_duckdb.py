@@ -21,7 +21,8 @@ import pytest
 import sqlalchemy as sa
 
 import nominatim_api as napi
-from nominatim_api.sql.duckdb_layout import LAYOUT_VERSION, LAYOUT_VERSION_PROPERTY
+from nominatim_api.sql.duckdb_layout import (LAYOUT_VERSION, LAYOUT_VERSION_PROPERTY,
+                                             PARQUET_TABLES_PROPERTY, STORAGE_FORMAT_PROPERTY)
 
 duckdb = pytest.importorskip('duckdb')
 pytest.importorskip('duckdb_engine')
@@ -263,3 +264,126 @@ async def test_duckdb_init_sql_is_run(duckdb_file):
                      }) as api:
         async with api.begin() as conn:
             assert await conn.scalar(sa.text("SELECT current_setting('threads')")) == 1
+
+
+def make_parquet_dir(directory, tables='nominatim_properties,x', version=str(LAYOUT_VERSION)):
+    with duckdb.connect() as conn:
+        conn.execute("CREATE TABLE x AS SELECT * FROM (VALUES (42, 'a'), (43, 'b')) t(v, s)")
+        conn.execute(f"COPY x TO '{directory / 'x.parquet'}' (FORMAT parquet)")
+        conn.execute('CREATE TABLE p (property TEXT, value TEXT)')
+        conn.execute('INSERT INTO p VALUES (?, ?), (?, ?)',
+                     (LAYOUT_VERSION_PROPERTY, version, STORAGE_FORMAT_PROPERTY, 'parquet'))
+        if tables is not None:
+            conn.execute('INSERT INTO p VALUES (?, ?)', (PARQUET_TABLES_PROPERTY, tables))
+        conn.execute(f"COPY p TO '{directory / 'nominatim_properties.parquet'}' (FORMAT parquet)")
+
+
+@pytest.mark.asyncio
+async def test_duckdb_parquet_local_directory(tmp_path):
+    make_parquet_dir(tmp_path)
+
+    async with napi.NominatimAPIAsync(
+            environ={'NOMINATIM_DATABASE_DSN': f'duckdb:parquet={tmp_path}'}) as api:
+        async with api.begin() as conn:
+            result = await conn.execute(sa.text('SELECT rowid, v, s FROM x ORDER BY rowid'))
+            assert [tuple(r) for r in result] == [(0, 42, 'a'), (1, 43, 'b')]
+            assert await conn.scalar(sa.text('SELECT v FROM x WHERE rowid IN (1)')) == 43
+
+
+@pytest.mark.asyncio
+async def test_duckdb_parquet_over_http(http_dir):
+    directory, url = http_dir
+    make_parquet_dir(directory)
+
+    async with napi.NominatimAPIAsync(
+            environ={'NOMINATIM_DATABASE_DSN': f'duckdb:parquet={url}/'}) as api:
+        async with api.begin() as conn1, api.begin() as conn2:
+            assert await conn1.scalar(sa.text('SELECT count(*) FROM x')) == 2
+            assert await conn2.scalar(sa.text('SELECT max(v) FROM x')) == 43
+
+
+@pytest.mark.asyncio
+async def test_duckdb_parquet_only_listed_tables(tmp_path):
+    make_parquet_dir(tmp_path, tables='nominatim_properties')  # x.parquet exists, not listed
+
+    async with napi.NominatimAPIAsync(
+            environ={'NOMINATIM_DATABASE_DSN': f'duckdb:parquet={tmp_path}'}) as api:
+        async with api.begin() as conn:
+            assert await conn.scalar(sa.text(
+                "SELECT count(*) FROM information_schema.tables WHERE table_name = 'x'")) == 0
+
+
+def test_duckdb_parquet_without_table_list_raises(tmp_path):
+    make_parquet_dir(tmp_path, tables=None)
+
+    with napi.NominatimAPI(
+            environ={'NOMINATIM_DATABASE_DSN': f'duckdb:parquet={tmp_path}'}) as api:
+        with pytest.raises(napi.UsageError, match=PARQUET_TABLES_PROPERTY):
+            api.status()
+
+
+def test_duckdb_parquet_without_properties_raises(tmp_path):
+    with napi.NominatimAPI(
+            environ={'NOMINATIM_DATABASE_DSN': f'duckdb:parquet={tmp_path}'}) as api:
+        with pytest.raises(napi.UsageError, match='Parquet'):
+            api.status()
+
+
+def test_duckdb_parquet_missing_directory_raises(tmp_path):
+    with napi.NominatimAPI(
+            environ={'NOMINATIM_DATABASE_DSN': f'duckdb:parquet={tmp_path / "nope"}'}) as api:
+        with pytest.raises(napi.UsageError, match='does not exist'):
+            api.status()
+
+
+def test_duckdb_parquet_layout_version_mismatch_raises(tmp_path):
+    make_parquet_dir(tmp_path, version='0')
+
+    with napi.NominatimAPI(
+            environ={'NOMINATIM_DATABASE_DSN': f'duckdb:parquet={tmp_path}'}) as api:
+        with pytest.raises(napi.UsageError, match='nominatim convert'):
+            api.status()
+
+
+def make_search_name_file(directory):
+    with duckdb.connect() as conn:
+        conn.execute(f"""COPY (SELECT * FROM (VALUES (7, [1]), (5, [2]), (9, [3]))
+                                         t(place_id, name_vector))
+                         TO '{directory / 'search_name.parquet'}' (FORMAT parquet)""")
+
+
+@pytest.mark.asyncio
+async def test_duckdb_parquet_loads_search_name_into_memory(tmp_path):
+    make_parquet_dir(tmp_path, tables='nominatim_properties,x,search_name')
+    make_search_name_file(tmp_path)
+
+    async with napi.NominatimAPIAsync(
+            environ={'NOMINATIM_DATABASE_DSN': f'duckdb:parquet={tmp_path}'}) as api:
+        async with api.begin() as conn:
+            assert await conn.scalar(sa.text(
+                "SELECT table_type FROM information_schema.tables"
+                " WHERE table_name = 'search_name'")) == 'BASE TABLE'
+            assert await conn.scalar(sa.text(
+                "SELECT table_type FROM information_schema.tables"
+                " WHERE table_name = 'x'")) == 'VIEW'
+            # rowid is the Parquet row number, like the row id of the database file
+            result = await conn.execute(sa.text(
+                'SELECT rowid, place_id FROM search_name WHERE rowid IN'
+                ' (SELECT rowid FROM search_name WHERE place_id IN (5, 9)) ORDER BY rowid'))
+            assert [tuple(r) for r in result] == [(1, 5), (2, 9)]
+
+
+@pytest.mark.asyncio
+async def test_duckdb_parquet_loads_search_name_once(tmp_path):
+    make_parquet_dir(tmp_path, tables='nominatim_properties,x,search_name')
+    make_search_name_file(tmp_path)
+
+    async with napi.NominatimAPIAsync(
+            environ={'NOMINATIM_DATABASE_DSN': f'duckdb:parquet={tmp_path}'}) as api:
+        async with api.begin() as conn1:
+            assert await conn1.scalar(sa.text('SELECT count(*) FROM search_name')) == 3
+            (tmp_path / 'search_name.parquet').unlink()
+            # A new connection of the pool uses the loaded table of the
+            # shared instance and does not read the file again.
+            async with api.begin() as conn2:
+                assert await conn2.scalar(sa.text('SELECT count(*) FROM search_name')) == 3

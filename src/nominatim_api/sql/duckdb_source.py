@@ -19,11 +19,12 @@ The part of a DuckDB DSN after `duckdb:` names one of:
 Remote and Parquet sources are served from a named in-memory DuckDB
 instance, see `DuckDBSource.instance_name()`.
 """
-from typing import Any, Literal
+from typing import Any, List, Literal, Optional
 import dataclasses
 import hashlib
 
 from ..errors import UsageError
+from .duckdb_layout import PARQUET_MEMORY_TABLES, PARQUET_TABLES_PROPERTY, PROPERTIES_TABLE
 
 SourceKind = Literal['file', 'remote', 'parquet']
 
@@ -100,6 +101,7 @@ class SourceConnector:
     def __init__(self, source: DuckDBSource, init_sql: str) -> None:
         self.source = source
         self.init_sql = [s.strip() for s in init_sql.split(';') if s.strip()]
+        self._parquet_tables: Optional[List[str]] = None
 
     def setup(self, cursor: Any) -> None:
         """ Initialise a new connection.
@@ -120,7 +122,63 @@ class SourceConnector:
             cursor.execute(f'ATTACH IF NOT EXISTS {quote(self.source.location)}'
                            f' AS {REMOTE_ALIAS} (READ_ONLY)')
             cursor.execute(f'USE {REMOTE_ALIAS}')
+        else:
+            self._create_views(cursor)
 
     def _run_init_sql(self, cursor: Any) -> None:
         for sql in self.init_sql:
             cursor.execute(sql)
+
+    def _parquet_select(self, table: str) -> str:
+        """ SQL for the rows of a table with the Parquet row number as rowid.
+        """
+        return (f'SELECT * EXCLUDE (file_row_number), file_row_number AS rowid'
+                f' FROM read_parquet({quote(self.source.parquet_file(table))},'
+                f' file_row_number = true)')
+
+    def _create_view(self, cursor: Any, table: str) -> None:
+        cursor.execute(f'CREATE VIEW IF NOT EXISTS "{table}" AS {self._parquet_select(table)}')
+
+    def _load_table(self, cursor: Any, table: str) -> None:
+        """ Copy a table into the shared in-memory instance, unless an
+            earlier connection already did. CREATE TABLE IF NOT EXISTS
+            alone would still bind (and so open) the Parquet file. The
+            first connection is made under the setup lock of the API, so
+            two connections never load at the same time.
+        """
+        cursor.execute("SELECT count(*) FROM duckdb_tables()"
+                       " WHERE database_name = current_database()"
+                       f" AND table_name = {quote(table)}")
+        row = cursor.fetchone()
+        if row is None or not row[0]:
+            cursor.execute(f'CREATE TABLE IF NOT EXISTS "{table}"'
+                           f' AS {self._parquet_select(table)}')
+
+    def _create_views(self, cursor: Any) -> None:
+        """ Create a view for every table of the Parquet export. The list
+            of tables is read once from the properties of the export.
+        """
+        import duckdb  # only installed with the DuckDB frontend
+
+        try:
+            self._create_view(cursor, PROPERTIES_TABLE)
+        except duckdb.Error as err:
+            raise UsageError(f"Cannot read the Parquet export at '{self.source.location}'"
+                             f" (created with 'nominatim convert --format parquet'): {err}"
+                             ) from err
+
+        if self._parquet_tables is None:
+            cursor.execute(f"SELECT max(value) FROM {PROPERTIES_TABLE}"
+                           f" WHERE property = {quote(PARQUET_TABLES_PROPERTY)}")
+            row = cursor.fetchone()
+            if row is None or not row[0]:
+                raise UsageError(f"Parquet export at '{self.source.location}' has no property"
+                                 f" '{PARQUET_TABLES_PROPERTY}'. Create it again with"
+                                 " 'nominatim convert --format parquet'.")
+            self._parquet_tables = [t for t in row[0].split(',') if t != PROPERTIES_TABLE]
+
+        for table in self._parquet_tables:
+            if table in PARQUET_MEMORY_TABLES:
+                self._load_table(cursor, table)
+            else:
+                self._create_view(cursor, table)
